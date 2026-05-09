@@ -15630,6 +15630,11 @@ class GatewayRunner:
                     _title_failure_cb = getattr(
                         agent, "_emit_auxiliary_failure", None
                     )
+                    _agent_ck = getattr(agent, "_client_kwargs", None) if agent else None
+                    _agent_hdrs = (
+                        _agent_ck.get("default_headers")
+                        if isinstance(_agent_ck, dict) else None
+                    )
                     maybe_auto_title_kwargs = {
                         "failure_callback": _title_failure_cb,
                         "main_runtime": {
@@ -15638,6 +15643,11 @@ class GatewayRunner:
                             "base_url": getattr(agent, "base_url", None),
                             "api_key": getattr(agent, "api_key", None),
                             "api_mode": getattr(agent, "api_mode", None),
+                            "default_headers": (
+                                dict(_agent_hdrs)
+                                if isinstance(_agent_hdrs, dict) and _agent_hdrs
+                                else None
+                            ),
                         } if agent else None,
                     }
                     if self._is_telegram_topic_lane(source):

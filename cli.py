@@ -10789,6 +10789,11 @@ class HermesCLI:
                     _title_failure_cb = getattr(
                         self.agent, "_emit_auxiliary_failure", None
                     ) if self.agent else None
+                    _agent_ck = getattr(self.agent, "_client_kwargs", None) if self.agent else None
+                    _agent_hdrs = (
+                        _agent_ck.get("default_headers")
+                        if isinstance(_agent_ck, dict) else None
+                    )
                     maybe_auto_title(
                         self._session_db,
                         self.session_id,
@@ -10802,6 +10807,11 @@ class HermesCLI:
                             "base_url": self.base_url,
                             "api_key": self.api_key,
                             "api_mode": self.api_mode,
+                            "default_headers": (
+                                dict(_agent_hdrs)
+                                if isinstance(_agent_hdrs, dict) and _agent_hdrs
+                                else None
+                            ),
                         },
                     )
                 except Exception:
