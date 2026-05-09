@@ -2228,6 +2228,7 @@ class AIAgent:
                 base_url=self.base_url,
                 api_key=getattr(self, "api_key", ""),
                 provider=self.provider,
+                default_headers=(getattr(self, "_client_kwargs", {}) or {}).get("default_headers"),
             )
             if not self.quiet_mode:
                 logger.info("Using context engine: %s", _selected_engine.name)
@@ -2245,6 +2246,7 @@ class AIAgent:
                 config_context_length=_config_context_length,
                 provider=self.provider,
                 api_mode=self.api_mode,
+                default_headers=(getattr(self, "_client_kwargs", {}) or {}).get("default_headers"),
             )
         self.compression_enabled = compression_enabled
 
@@ -2515,6 +2517,7 @@ class AIAgent:
                         api_key=getattr(self, "api_key", ""),
                         provider=self.provider,
                         api_mode=self.api_mode,
+                        default_headers=(getattr(self, "_client_kwargs", {}) or {}).get("default_headers"),
                     )
         except Exception as err:
             logger.debug("LM Studio preload skipped: %s", err)
@@ -2651,6 +2654,7 @@ class AIAgent:
                 api_key=getattr(self, "api_key", ""),
                 provider=self.provider,
                 api_mode=self.api_mode,
+                default_headers=(getattr(self, "_client_kwargs", {}) or {}).get("default_headers"),
             )
 
         # ── Invalidate cached system prompt so it rebuilds next turn ──
@@ -2834,14 +2838,17 @@ class AIAgent:
             detail = detail[:217].rstrip() + "..."
         self._emit_warning(f"⚠ Auxiliary {task} failed: {detail}")
 
-    def _current_main_runtime(self) -> Dict[str, str]:
+    def _current_main_runtime(self) -> Dict[str, Any]:
         """Return the live main runtime for session-scoped auxiliary routing."""
+        _ck = getattr(self, "_client_kwargs", None) or {}
+        _hdrs = _ck.get("default_headers") if isinstance(_ck, dict) else None
         return {
             "model": getattr(self, "model", "") or "",
             "provider": getattr(self, "provider", "") or "",
             "base_url": getattr(self, "base_url", "") or "",
             "api_key": getattr(self, "api_key", "") or "",
             "api_mode": getattr(self, "api_mode", "") or "",
+            "default_headers": dict(_hdrs) if isinstance(_hdrs, dict) and _hdrs else None,
         }
 
     def _check_compression_model_feasibility(self) -> None:
@@ -8262,6 +8269,7 @@ class AIAgent:
                     base_url=self.base_url,
                     api_key=getattr(self, "api_key", ""),
                     provider=self.provider,
+                    default_headers=(getattr(self, "_client_kwargs", {}) or {}).get("default_headers"),
                 )
 
             self._emit_status(
@@ -8341,6 +8349,7 @@ class AIAgent:
                 base_url=rt["compressor_base_url"],
                 api_key=rt["compressor_api_key"],
                 provider=rt["compressor_provider"],
+                default_headers=(getattr(self, "_client_kwargs", {}) or {}).get("default_headers"),
             )
 
             # ── Reset fallback chain for the new turn ──
@@ -13124,6 +13133,7 @@ class AIAgent:
                                 base_url=self.base_url,
                                 api_key=getattr(self, "api_key", ""),
                                 provider=self.provider,
+                                default_headers=(getattr(self, "_client_kwargs", {}) or {}).get("default_headers"),
                             )
                             # Context probing flags — only set on built-in
                             # compressor (plugin engines manage their own).
@@ -13400,6 +13410,7 @@ class AIAgent:
                                 base_url=self.base_url,
                                 api_key=getattr(self, "api_key", ""),
                                 provider=self.provider,
+                                default_headers=(getattr(self, "_client_kwargs", {}) or {}).get("default_headers"),
                             )
                             # Context probing flags — only set on built-in
                             # compressor (plugin engines manage their own).
