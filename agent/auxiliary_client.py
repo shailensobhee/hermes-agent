@@ -1840,8 +1840,8 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
 
     String fields (provider/model/base_url/api_key/api_mode) are stripped and
     lowercased where appropriate.  ``default_headers`` (dict) is preserved so
-    transports that need extra HTTP headers (e.g. AMD LLM Gateway's
-    ``Ocp-Apim-Subscription-Key``) can forward them to the underlying SDK.
+    transports that need extra HTTP headers (e.g. an API-management
+    subscription key) can forward them to the underlying SDK.
     """
     if not isinstance(main_runtime, dict):
         return {}
@@ -2763,7 +2763,7 @@ def resolve_provider_client(
 
         Clients that are already specialized wrappers pass through unchanged.
         ``default_headers`` (when provided) is forwarded to ``build_anthropic_client``
-        so gateway auth headers like ``Ocp-Apim-Subscription-Key`` propagate to
+        so custom gateway auth headers propagate to
         the wrapped Anthropic SDK transport.
         """
         if _needs_codex_wrap(client_obj, base_url_str, final_model_str):
@@ -2885,9 +2885,8 @@ def resolve_provider_client(
             _clean_base, _dq = _extract_url_query_params(custom_base)
             if _dq:
                 extra["default_query"] = _dq
-            # Extract caller-supplied headers from main_runtime so gateway
-            # auth (e.g. Ocp-Apim-Subscription-Key) propagates to the
-            # auxiliary transport.
+            # Extract caller-supplied headers from main_runtime so custom
+            # gateway auth headers propagate to the auxiliary transport.
             _runtime_headers: Optional[Dict[str, str]] = None
             if isinstance(main_runtime, dict):
                 _rh = main_runtime.get("default_headers")

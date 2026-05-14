@@ -1601,10 +1601,33 @@ class AIAgent:
                 # the third-party identity-injection bug.
                 from agent.anthropic_adapter import _is_oauth_token as _is_oat
                 self._is_anthropic_oauth = _is_oat(effective_key) if _is_native_anthropic else False
-                self._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
+                # Resolve custom_headers from custom_providers config for
+                # gateway auth (e.g. subscription keys for API-management proxies).
+                _custom_default_headers = None
+                try:
+                    from hermes_cli.config import load_config as _load_cp_cfg
+                    _cp_cfg = _load_cp_cfg()
+                    _cp_list = _cp_cfg.get("custom_providers", [])
+                    if isinstance(_cp_list, list):
+                        for _cp in _cp_list:
+                            if isinstance(_cp, dict) and _cp.get("custom_headers"):
+                                _cp_base = (_cp.get("base_url") or "").rstrip("/")
+                                _my_base = (base_url or "").rstrip("/")
+                                if _cp_base and _my_base and _cp_base.lower() == _my_base.lower():
+                                    _custom_default_headers = dict(_cp.get("custom_headers"))
+                                    break
+                except Exception:
+                    pass
+                self._anthropic_client = build_anthropic_client(
+                    effective_key, base_url, timeout=_provider_timeout,
+                    default_headers=_custom_default_headers,
+                )
+                # Store headers in _client_kwargs so auxiliary client can pick them up
+                self._client_kwargs = {}
+                if _custom_default_headers:
+                    self._client_kwargs["default_headers"] = _custom_default_headers
                 # No OpenAI client needed for Anthropic mode
                 self.client = None
-                self._client_kwargs = {}
                 if not self.quiet_mode:
                     print(f"🤖 AI Agent initialized with model: {self.model} (Anthropic native)")
                     if effective_key and len(effective_key) > 12:
