@@ -9954,7 +9954,8 @@ class HermesCLI:
             "selected": 0,
             "response_queue": response_queue,
         }
-        self._clarify_deadline = _time.monotonic() + timeout
+        # timeout=0 means "wait indefinitely" — no deadline
+        self._clarify_deadline = 0 if not timeout else _time.monotonic() + timeout
         # Open-ended questions skip straight to freetext input
         self._clarify_freetext = is_open_ended
 
@@ -9977,14 +9978,12 @@ class HermesCLI:
                 self._clarify_deadline = 0
                 return result
             except queue.Empty:
-                remaining = self._clarify_deadline - _time.monotonic()
-                if remaining <= 0:
-                    break
+                if self._clarify_deadline:
+                    remaining = self._clarify_deadline - _time.monotonic()
+                    if remaining <= 0:
+                        break
                 # Only repaint every 5 s for the countdown — avoids flicker
                 now = _time.monotonic()
-                if now - _last_countdown_refresh >= 5.0:
-                    _last_countdown_refresh = now
-                    self._invalidate()
                 if now - _last_countdown_refresh >= 5.0:
                     _last_countdown_refresh = now
                     self._invalidate()
@@ -10074,7 +10073,8 @@ class HermesCLI:
                 "selected": 0,
                 "response_queue": response_queue,
             }
-            self._approval_deadline = _time.monotonic() + timeout
+            # timeout=0 means "wait indefinitely" — no deadline
+            self._approval_deadline = 0 if not timeout else _time.monotonic() + timeout
 
             self._invalidate()
 
@@ -10087,9 +10087,10 @@ class HermesCLI:
                     self._invalidate()
                     return result
                 except queue.Empty:
-                    remaining = self._approval_deadline - _time.monotonic()
-                    if remaining <= 0:
-                        break
+                    if self._approval_deadline:
+                        remaining = self._approval_deadline - _time.monotonic()
+                        if remaining <= 0:
+                            break
                     now = _time.monotonic()
                     if now - _last_countdown_refresh >= 5.0:
                         _last_countdown_refresh = now
@@ -12455,10 +12456,14 @@ class HermesCLI:
                 ]
 
             if cli_ref._approval_state:
-                remaining = max(0, int(cli_ref._approval_deadline - time.monotonic()))
+                if cli_ref._approval_deadline:
+                    remaining = max(0, int(cli_ref._approval_deadline - time.monotonic()))
+                    countdown = f'  ({remaining}s)'
+                else:
+                    countdown = ''
                 return [
                     ('class:hint', '  ↑/↓ to select, Enter to confirm'),
-                    ('class:clarify-countdown', f'  ({remaining}s)'),
+                    ('class:clarify-countdown', countdown),
                 ]
 
             if cli_ref._slash_confirm_state:
