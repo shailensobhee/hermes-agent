@@ -1658,6 +1658,7 @@ class AIAgent:
                 # Resolve custom_headers from custom_providers config for
                 # gateway auth (e.g. subscription keys for API-management proxies).
                 _custom_default_headers = None
+                _custom_verify = True
                 try:
                     from hermes_cli.config import load_config as _load_cp_cfg
                     _cp_cfg = _load_cp_cfg()
@@ -1669,12 +1670,15 @@ class AIAgent:
                                 _my_base = (base_url or "").rstrip("/")
                                 if _cp_base and _my_base and _cp_base.lower() == _my_base.lower():
                                     _custom_default_headers = dict(_cp.get("custom_headers"))
+                                    if isinstance(_cp.get("verify"), bool):
+                                        _custom_verify = _cp["verify"]
                                     break
                 except Exception:
                     pass
                 self._anthropic_client = build_anthropic_client(
                     effective_key, base_url, timeout=_provider_timeout,
                     default_headers=_custom_default_headers,
+                    verify=_custom_verify,
                 )
                 # Store headers in _client_kwargs so auxiliary client can pick them up
                 self._client_kwargs = {}
