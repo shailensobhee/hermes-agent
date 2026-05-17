@@ -955,6 +955,12 @@ class MessageEvent:
     # Per-channel ephemeral system prompt (e.g. Discord channel_prompts).
     # Applied at API call time and never persisted to transcript history.
     channel_prompt: Optional[str] = None
+
+    # Channel context recovered by history backfill (e.g. messages between
+    # bot turns that were missed due to require_mention).  Kept separate
+    # from ``text`` so the sender-prefix logic in run.py can operate on the
+    # trigger message alone, then prepend this context afterward.
+    channel_context: Optional[str] = None
     
     # Internal flag — set for synthetic events (e.g. background process
     # completion notifications) that must bypass user authorization checks.
@@ -2955,9 +2961,25 @@ class BasePlatformAdapter(ABC):
                 merge_pending_message_event(self._pending_messages, session_key, event)
                 return  # Don't interrupt now - will run after current task completes
 
-            # Default behavior for non-photo follow-ups: interrupt the running agent
+            # Default behavior for non-photo follow-ups: interrupt the running agent.
+            #
+            # Use merge_text=True so rapid TEXT follow-ups (#4469) accumulate
+            # into the single pending slot instead of clobbering each other.
+            # Without merging, three rapid messages "A", "B", "C" land like:
+            #   _pending_messages[k] = A  (interrupts)
+            #   _pending_messages[k] = B  (replaces A before consumer reads)
+            #   _pending_messages[k] = C  (replaces B)
+            # ...and only "C" reaches the next turn.  merge_pending_message_event
+            # already does the right thing for photo/media bursts; the
+            # ``merge_text=True`` flag extends that to plain TEXT events.
+            # Same shape as the Telegram bursty-grace path in gateway/run.py.
             logger.debug("[%s] New message while session %s is active — triggering interrupt", self.name, session_key)
-            self._pending_messages[session_key] = event
+            merge_pending_message_event(
+                self._pending_messages,
+                session_key,
+                event,
+                merge_text=True,
+            )
             # Signal the interrupt (the processing task checks this)
             self._active_sessions[session_key].set()
             return  # Don't process now - will be handled after current task finishes
