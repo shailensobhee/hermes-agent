@@ -3003,6 +3003,7 @@ def _normalize_custom_provider_entry(
         "context_length", "rate_limit_delay",
         "request_timeout_seconds", "stale_timeout_seconds",
         "discover_models",
+        "custom_headers", "id", "verify",
     }
     for camel, snake in _CAMEL_ALIASES.items():
         if camel in entry and snake not in entry:
@@ -3096,6 +3097,17 @@ def _normalize_custom_provider_entry(
     discover_models = entry.get("discover_models")
     if isinstance(discover_models, bool):
         normalized["discover_models"] = discover_models
+
+    # Preserve custom_headers for providers that need extra HTTP headers
+    # (e.g. API gateway auth like Ocp-Apim-Subscription-Key).
+    custom_headers = entry.get("custom_headers")
+    if isinstance(custom_headers, dict) and custom_headers:
+        normalized["custom_headers"] = dict(custom_headers)
+
+    # Preserve verify flag for self-signed cert proxies.
+    verify = entry.get("verify")
+    if isinstance(verify, bool):
+        normalized["verify"] = verify
 
     return normalized
 

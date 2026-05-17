@@ -560,7 +560,9 @@ def init_agent(
             # right header set. See PR #3 / commit fc1b74a02 on the fork —
             # forward-ported to agent_init.py after upstream's refactor that
             # moved client construction here from run_agent.py.
+            # Also resolves the `verify` flag for self-signed cert proxies.
             _custom_default_headers = None
+            _custom_verify = True
             try:
                 from hermes_cli.config import load_config as _load_cp_cfg
                 _cp_cfg = _load_cp_cfg()
@@ -572,12 +574,15 @@ def init_agent(
                             _my_base = (base_url or "").rstrip("/")
                             if _cp_base and _my_base and _cp_base.lower() == _my_base.lower():
                                 _custom_default_headers = dict(_cp.get("custom_headers"))
+                                if isinstance(_cp.get("verify"), bool):
+                                    _custom_verify = _cp["verify"]
                                 break
             except Exception:
                 pass
             agent._anthropic_client = build_anthropic_client(
                 effective_key, base_url, timeout=_provider_timeout,
                 default_headers=_custom_default_headers,
+                verify=_custom_verify,
             )
             # No OpenAI client needed for Anthropic mode
             agent.client = None
