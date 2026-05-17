@@ -2902,6 +2902,7 @@ def _normalize_custom_provider_entry(
         "api_mode", "transport", "model", "default_model", "models",
         "context_length", "rate_limit_delay",
         "request_timeout_seconds", "stale_timeout_seconds",
+        "custom_headers", "id", "verify",
     }
     for camel, snake in _CAMEL_ALIASES.items():
         if camel in entry and snake not in entry:
@@ -2991,6 +2992,17 @@ def _normalize_custom_provider_entry(
     rate_limit_delay = entry.get("rate_limit_delay")
     if isinstance(rate_limit_delay, (int, float)) and rate_limit_delay >= 0:
         normalized["rate_limit_delay"] = rate_limit_delay
+
+    # Preserve custom_headers for providers that need extra HTTP headers
+    # (e.g. API gateway auth like Ocp-Apim-Subscription-Key).
+    custom_headers = entry.get("custom_headers")
+    if isinstance(custom_headers, dict) and custom_headers:
+        normalized["custom_headers"] = dict(custom_headers)
+
+    # Preserve verify flag for self-signed cert proxies.
+    verify = entry.get("verify")
+    if isinstance(verify, bool):
+        normalized["verify"] = verify
 
     return normalized
 
