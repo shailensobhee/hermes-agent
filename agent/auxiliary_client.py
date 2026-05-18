@@ -2940,12 +2940,31 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
     # config.yaml (auxiliary.<task>.provider) still win over this.
     main_provider = str(runtime_provider or _read_main_provider() or "")
     main_model = str(runtime_model or _read_main_model() or "")
+    runtime_default_headers = runtime.get("default_headers")
     if (main_provider and main_model
             and main_provider not in {"auto", ""}):
         resolved_provider = main_provider
         explicit_base_url = None
         explicit_api_key = None
         if runtime_base_url and (main_provider == "custom" or main_provider.startswith("custom:")):
+            resolved_provider = "custom"
+            explicit_base_url = runtime_base_url
+            explicit_api_key = runtime_api_key or None
+        # APIM-style gateway reroute: when the live runtime carries an
+        # explicit base_url AND non-empty default_headers (typically an
+        # Ocp-Apim-Subscription-Key on a third-party Anthropic/OpenAI gateway),
+        # the user has manually overridden BOTH the URL and the auth headers.
+        # Bypass the native provider branches (which would route to the
+        # provider's canonical hostname with provider-only auth and lose the
+        # subscription header) and go through the anonymous-custom branch,
+        # which forwards default_headers to the SDK and re-wraps for
+        # anthropic_messages when needed.  This fixes auxiliary 401s after a
+        # /model switch from `custom:<gateway>` to a native provider name
+        # (e.g. switching to Claude-Opus-4.7 promotes provider to "anthropic"
+        # while keeping the AMD gateway base_url + headers in _client_kwargs).
+        elif (runtime_base_url
+              and isinstance(runtime_default_headers, dict)
+              and runtime_default_headers):
             resolved_provider = "custom"
             explicit_base_url = runtime_base_url
             explicit_api_key = runtime_api_key or None
