@@ -515,7 +515,18 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         provider_key = str(entry.get("provider_key", "") or "").strip()
         provider_key_norm = _normalize_custom_provider_name(provider_key) if provider_key else ""
         provider_menu_key = f"custom:{provider_key_norm}" if provider_key_norm else ""
-        if requested_norm not in {name_norm, menu_key, provider_key_norm, provider_menu_key}:
+        # ``id`` is a stable slug carried through from the on-disk config
+        # by ``_normalize_custom_provider_entry``.  Matching against it
+        # lets users rename the cosmetic ``name`` field without breaking
+        # persisted ``model.provider: custom:<id>`` references.
+        entry_id = str(entry.get("id", "") or "").strip()
+        entry_id_norm = _normalize_custom_provider_name(entry_id) if entry_id else ""
+        entry_id_menu_key = f"custom:{entry_id_norm}" if entry_id_norm else ""
+        if requested_norm not in {
+            name_norm, menu_key,
+            provider_key_norm, provider_menu_key,
+            entry_id_norm, entry_id_menu_key,
+        }:
             continue
         result = {
             "name": name.strip(),

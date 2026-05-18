@@ -2902,6 +2902,7 @@ def _normalize_custom_provider_entry(
         "api_mode", "transport", "model", "default_model", "models",
         "context_length", "rate_limit_delay",
         "request_timeout_seconds", "stale_timeout_seconds",
+        "id",
     }
     for camel, snake in _CAMEL_ALIASES.items():
         if camel in entry and snake not in entry:
@@ -2991,6 +2992,18 @@ def _normalize_custom_provider_entry(
     rate_limit_delay = entry.get("rate_limit_delay")
     if isinstance(rate_limit_delay, (int, float)) and rate_limit_delay >= 0:
         normalized["rate_limit_delay"] = rate_limit_delay
+
+    # Preserve the stable ``id`` slug so renaming the user-facing ``name``
+    # doesn't break ``model.provider: custom:<id>`` resolution downstream.
+    # The runtime resolver (``_get_named_custom_provider`` in
+    # runtime_provider.py) matches the requested provider key against the
+    # id-derived slug too — but the lookup only sees what this normalizer
+    # forwards. Without preserving ``id`` here, a cosmetic ``name`` change
+    # silently invalidates every persisted ``custom:<old-slug>`` reference
+    # (main model, gateway, auxiliary tasks, cron jobs).
+    entry_id = entry.get("id")
+    if isinstance(entry_id, str) and entry_id.strip():
+        normalized["id"] = entry_id.strip()
 
     return normalized
 
