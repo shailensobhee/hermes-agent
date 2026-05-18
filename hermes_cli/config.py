@@ -3109,6 +3109,18 @@ def _normalize_custom_provider_entry(
     if isinstance(verify, bool):
         normalized["verify"] = verify
 
+    # Preserve the stable ``id`` slug so renaming the user-facing ``name``
+    # doesn't break ``model.provider: custom:<id>`` resolution downstream.
+    # The runtime resolver (``_get_named_custom_provider`` in
+    # runtime_provider.py) matches the requested provider key against the
+    # id-derived slug too — but the lookup only sees what this normalizer
+    # forwards. Without preserving ``id`` here, a cosmetic ``name`` change
+    # silently invalidates every persisted ``custom:<old-slug>`` reference
+    # (main model, gateway, auxiliary tasks, cron jobs).
+    entry_id = entry.get("id")
+    if isinstance(entry_id, str) and entry_id.strip():
+        normalized["id"] = entry_id.strip()
+
     return normalized
 
 
