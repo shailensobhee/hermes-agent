@@ -814,16 +814,32 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         if fb_api_mode == "anthropic_messages":
             # Build native Anthropic client instead of using OpenAI client
             from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
+            from run_agent import _resolve_custom_provider_headers_for_base_url
             effective_key = (fb_client.api_key or resolve_anthropic_token() or "") if fb_provider == "anthropic" else (fb_client.api_key or "")
             agent.api_key = effective_key
             agent._anthropic_api_key = effective_key
             agent._anthropic_base_url = fb_base_url
+            # Resolve APIM-style gateway custom_headers/verify for the
+            # fallback's base_url so the fallback client carries the
+            # right subscription header.  Falls back to the previously
+            # stashed values when no custom_providers entry matches.
+            _fb_hdrs, _fb_vfy = _resolve_custom_provider_headers_for_base_url(
+                fb_base_url,
+                fallback_headers=getattr(agent, "_anthropic_default_headers", None),
+                fallback_verify=getattr(agent, "_anthropic_verify", True),
+            )
+            agent._anthropic_default_headers = _fb_hdrs
+            agent._anthropic_verify = _fb_vfy
             agent._anthropic_client = build_anthropic_client(
                 effective_key, agent._anthropic_base_url, timeout=_fb_timeout,
+                default_headers=_fb_hdrs,
+                verify=_fb_vfy,
             )
             agent._is_anthropic_oauth = _is_oauth_token(effective_key) if fb_provider == "anthropic" else False
             agent.client = None
             agent._client_kwargs = {}
+            if _fb_hdrs:
+                agent._client_kwargs["default_headers"] = dict(_fb_hdrs)
         else:
             # Swap OpenAI client and config in-place
             agent.api_key = fb_client.api_key

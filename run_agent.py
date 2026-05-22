@@ -284,6 +284,53 @@ def _qwen_portal_headers() -> dict:
     }
 
 
+def _resolve_custom_provider_headers_for_base_url(
+    base_url,
+    *,
+    fallback_headers=None,
+    fallback_verify: bool = True,
+):
+    """Look up ``custom_headers``/``verify`` for a base_url from custom_providers.
+
+    Used by Anthropic client rebuild paths (interrupt, stale-call,
+    credential swap) to keep APIM-style gateway subscription headers
+    attached after the initial client was constructed.
+
+    Matches ``base_url`` case-insensitively and after stripping a trailing
+    slash against each ``custom_providers`` entry's ``base_url``.  Returns
+    the entry's ``custom_headers`` (as a fresh dict) and ``verify`` flag
+    when a match is found; otherwise returns the supplied fallbacks so a
+    rebuild without a matching entry keeps the previously-resolved values
+    instead of accidentally dropping them.
+
+    Safe to call from any thread / any provider; failures are swallowed
+    and the fallbacks are returned.
+    """
+    if not base_url:
+        return fallback_headers, fallback_verify
+    try:
+        from hermes_cli.config import load_config as _load_cp_cfg
+        cfg = _load_cp_cfg() or {}
+        cp_list = cfg.get("custom_providers") or []
+        if not isinstance(cp_list, list):
+            return fallback_headers, fallback_verify
+        my_base = str(base_url or "").rstrip("/").lower()
+        for cp in cp_list:
+            if not isinstance(cp, dict):
+                continue
+            cp_base = str(cp.get("base_url") or "").rstrip("/").lower()
+            if not cp_base or cp_base != my_base:
+                continue
+            hdrs = cp.get("custom_headers")
+            resolved_hdrs = dict(hdrs) if isinstance(hdrs, dict) and hdrs else None
+            verify_val = cp.get("verify", True)
+            resolved_verify = bool(verify_val) if isinstance(verify_val, bool) else True
+            return resolved_hdrs, resolved_verify
+    except Exception:
+        pass
+    return fallback_headers, fallback_verify
+
+
 class _StreamErrorEvent(Exception):
     """Synthesized provider error surfaced from a Responses ``error`` SSE frame.
 
@@ -2754,6 +2801,8 @@ class AIAgent:
                 new_token,
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
+                default_headers=getattr(self, "_anthropic_default_headers", None),
+                verify=getattr(self, "_anthropic_verify", True),
             )
         except Exception as exc:
             logger.warning("Failed to rebuild Anthropic client after credential refresh: %s", exc)
@@ -2825,9 +2874,23 @@ class AIAgent:
 
             self._anthropic_api_key = runtime_key
             self._anthropic_base_url = runtime_base
+            # Re-resolve custom_providers headers/verify for the (possibly
+            # new) base_url so APIM-style gateways keep their subscription
+            # headers after a credential swap.  Falls back to the existing
+            # stash when no custom_providers entry matches (e.g. swap stays
+            # on the same gateway, or moves to a non-APIM endpoint).
+            _hdrs, _vfy = _resolve_custom_provider_headers_for_base_url(
+                runtime_base,
+                fallback_headers=getattr(self, "_anthropic_default_headers", None),
+                fallback_verify=getattr(self, "_anthropic_verify", True),
+            )
+            self._anthropic_default_headers = _hdrs
+            self._anthropic_verify = _vfy
             self._anthropic_client = build_anthropic_client(
                 runtime_key, runtime_base,
                 timeout=get_provider_request_timeout(self.provider, self.model),
+                default_headers=_hdrs,
+                verify=_vfy,
             )
             self._is_anthropic_oauth = _is_oauth_token(runtime_key) if self.provider == "anthropic" else False
             self.api_key = runtime_key
@@ -2897,6 +2960,8 @@ class AIAgent:
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
                 drop_context_1m_beta=_drop_1m,
+                default_headers=getattr(self, "_anthropic_default_headers", None),
+                verify=getattr(self, "_anthropic_verify", True),
             )
 
     def _interruptible_api_call(self, api_kwargs: dict):

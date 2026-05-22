@@ -510,6 +510,14 @@ def init_agent(
     # access for Codex Responses API streaming.
     agent._anthropic_client = None
     agent._is_anthropic_oauth = False
+    # Stash for custom_providers `custom_headers` / `verify` so Anthropic
+    # client rebuilds (interrupt, stale-call, credential rotation, fallback)
+    # can re-apply them.  Default to None / True so non-APIM providers and
+    # non-Anthropic modes are unaffected.  Populated below in the
+    # ``anthropic_messages`` native branch when the matching custom_providers
+    # entry carries headers.
+    agent._anthropic_default_headers = None
+    agent._anthropic_verify = True
 
     # Resolve per-provider / per-model request timeout once up front so
     # every client construction path below (Anthropic native, OpenAI-wire,
@@ -561,24 +569,10 @@ def init_agent(
             # forward-ported to agent_init.py after upstream's refactor that
             # moved client construction here from run_agent.py.
             # Also resolves the `verify` flag for self-signed cert proxies.
-            _custom_default_headers = None
-            _custom_verify = True
-            try:
-                from hermes_cli.config import load_config as _load_cp_cfg
-                _cp_cfg = _load_cp_cfg()
-                _cp_list = _cp_cfg.get("custom_providers", [])
-                if isinstance(_cp_list, list):
-                    for _cp in _cp_list:
-                        if isinstance(_cp, dict) and _cp.get("custom_headers"):
-                            _cp_base = (_cp.get("base_url") or "").rstrip("/")
-                            _my_base = (base_url or "").rstrip("/")
-                            if _cp_base and _my_base and _cp_base.lower() == _my_base.lower():
-                                _custom_default_headers = dict(_cp.get("custom_headers"))
-                                if isinstance(_cp.get("verify"), bool):
-                                    _custom_verify = _cp["verify"]
-                                break
-            except Exception:
-                pass
+            from run_agent import _resolve_custom_provider_headers_for_base_url
+            _custom_default_headers, _custom_verify = (
+                _resolve_custom_provider_headers_for_base_url(base_url)
+            )
             agent._anthropic_client = build_anthropic_client(
                 effective_key, base_url, timeout=_provider_timeout,
                 default_headers=_custom_default_headers,
@@ -590,6 +584,17 @@ def init_agent(
             # Store headers in _client_kwargs so auxiliary client can pick them up
             if _custom_default_headers:
                 agent._client_kwargs["default_headers"] = _custom_default_headers
+            # Stash the resolved custom_providers headers + verify flag on the
+            # agent so client rebuilds (interrupt, stale-call, credential
+            # rotation, fallback) can re-apply them.  Without this, every
+            # rebuild drops the subscription headers and APIM-style gateways
+            # (AMD LLM Gateway, Azure APIM, Kong etc.) return 401 after the
+            # first interrupt — silently breaking the session's LLM
+            # connection.  See custom-provider-headers-pitfall.md Problem 14.
+            agent._anthropic_default_headers = (
+                dict(_custom_default_headers) if _custom_default_headers else None
+            )
+            agent._anthropic_verify = _custom_verify
             if not agent.quiet_mode:
                 print(f"🤖 AI Agent initialized with model: {agent.model} (Anthropic native)")
                 # ``effective_key`` may be a callable Entra ID bearer
