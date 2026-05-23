@@ -183,6 +183,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                             "heartbeat", "assignees", "context", "specify", "gc")),
     CommandDef("reload", "Reload .env variables into the running session", "Tools & Skills",
                cli_only=True),
+    CommandDef("reload-config", "Reload ~/.hermes/config.yaml into the running session (no restart needed)",
+               "Tools & Skills", cli_only=True, aliases=("reload_config",)),
     CommandDef("reload-mcp", "Reload MCP servers from config", "Tools & Skills",
                aliases=("reload_mcp",)),
     CommandDef("reload-skills", "Re-scan ~/.hermes/skills/ for newly installed or removed skills",
