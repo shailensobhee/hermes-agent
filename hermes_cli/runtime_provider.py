@@ -1666,3 +1666,41 @@ def format_runtime_provider_error(error: Exception) -> str:
     if isinstance(error, AuthError):
         return format_auth_error(error)
     return str(error)
+
+
+def resolve_custom_gateway_headers(base_url: str):
+    """Look up custom_headers + verify for *base_url* in custom_providers.
+
+    Returns ``(headers_dict | None, verify_bool | None)``.  Both may be
+    ``None`` when no entry matches the given base_url.  Case-insensitive
+    URL matching with trailing slash stripped on both sides.
+
+    Used by ``build_anthropic_client()`` to auto-inject APIM subscription
+    keys (e.g. ``Ocp-Apim-Subscription-Key``) without requiring every
+    caller to explicitly forward headers.
+    """
+    if not base_url:
+        return None, None
+    try:
+        config = load_config()
+    except Exception:
+        return None, None
+
+    my_base = base_url.rstrip("/").lower()
+    providers = get_compatible_custom_providers(config)
+    if not providers:
+        return None, None
+
+    for entry in providers:
+        if not isinstance(entry, dict):
+            continue
+        entry_base = (entry.get("base_url") or "").rstrip("/").lower()
+        if not entry_base or entry_base != my_base:
+            continue
+        headers = entry.get("custom_headers")
+        if isinstance(headers, dict) and headers:
+            verify = entry.get("verify")
+            if verify is not None:
+                verify = bool(verify)
+            return dict(headers), verify
+    return None, None

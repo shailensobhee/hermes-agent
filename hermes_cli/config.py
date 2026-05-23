@@ -3049,6 +3049,7 @@ def _normalize_custom_provider_entry(
         "context_length", "rate_limit_delay",
         "request_timeout_seconds", "stale_timeout_seconds",
         "discover_models", "extra_body",
+        "custom_headers", "verify", "id",
     }
     for camel, snake in _CAMEL_ALIASES.items():
         if camel in entry and snake not in entry:
@@ -3146,6 +3147,21 @@ def _normalize_custom_provider_entry(
     extra_body = entry.get("extra_body")
     if isinstance(extra_body, dict):
         normalized["extra_body"] = dict(extra_body)
+
+    # Custom gateway headers (e.g. Ocp-Apim-Subscription-Key for APIM proxies)
+    custom_headers = entry.get("custom_headers")
+    if isinstance(custom_headers, dict) and custom_headers:
+        normalized["custom_headers"] = dict(custom_headers)
+
+    # SSL verify override (False for self-signed cert proxies)
+    verify = entry.get("verify")
+    if verify is not None:
+        normalized["verify"] = bool(verify)
+
+    # Stable provider id slug
+    provider_id = entry.get("id")
+    if isinstance(provider_id, str) and provider_id.strip():
+        normalized["id"] = provider_id.strip()
 
     return normalized
 
