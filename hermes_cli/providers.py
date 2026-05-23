@@ -630,7 +630,12 @@ def resolve_custom_provider(
             first_valid = (display_name, api_url)
 
         slug = custom_provider_slug(display_name)
-        if requested not in {display_name.lower(), slug}:
+        # Also match on the stable "id" field (e.g. "amd-llm-gateway-anthropic")
+        entry_id = (entry.get("id") or "").strip().lower()
+        entry_id_slug = f"custom:{entry_id}" if entry_id else ""
+        match_set = {display_name.lower(), slug, entry_id, entry_id_slug}
+        match_set.discard("")
+        if requested not in match_set:
             continue
 
         return ProviderDef(
