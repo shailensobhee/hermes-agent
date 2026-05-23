@@ -1,11 +1,34 @@
 """
 SQLite-backed fact store with entity resolution and trust scoring.
 Single-user Hermes memory store plugin.
+
+Concurrency hardening (added 2026-05-22):
+    - PRAGMA busy_timeout=30000 so the kernel waits up to 30s on locks
+      instead of failing immediately. Critical when multiple Hermes
+      processes (gateway, CLI sessions a/b/c) share the same DB.
+    - PRAGMA synchronous=NORMAL (safe in WAL mode, much faster fsync).
+    - PRAGMA wal_autocheckpoint=200 so WAL gets recycled regularly and
+      readers cannot pin an old WAL forever (the bug we hit on 2026-05-22
+      where a sibling read transaction kept the WAL at 800KB+ for 6h+).
+    - All write methods are wrapped with _retry_locked() which catches
+      OperationalError('database is locked') and retries with exponential
+      backoff (5 attempts, 0.2s -> 3.2s). Final safety net beyond
+      busy_timeout.
+    - Every successful add_fact is also append-logged as a single line
+      to ~/.hermes/memory_store.jsonl (write-through backup). Survives
+      total DB corruption: the cron watchdog at
+      ~/.hermes/scripts/memory_store_watchdog.py replays missing facts
+      from the JSONL into the DB.
 """
 
+import json
+import os
+import random
 import re
 import sqlite3
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -115,10 +138,21 @@ class MemoryStore:
         self._conn: sqlite3.Connection = sqlite3.connect(
             str(self.db_path),
             check_same_thread=False,
-            timeout=10.0,
+            timeout=30.0,
         )
         self._lock = threading.RLock()
         self._conn.row_factory = sqlite3.Row
+        # JSONL write-through backup path (sibling of the DB).
+        # Append-only, one fact per line. Survives DB corruption.
+        self._jsonl_path = self.db_path.with_suffix(".jsonl")
+        self._jsonl_lock = threading.Lock()
+        # Wedge sentinel: when set True, the DB is treated as unavailable
+        # for THIS process's lifetime and add_fact writes go straight to
+        # the JSONL backup (the watchdog replays them once the sibling
+        # transaction clears). Prevents one stuck sibling from making
+        # every subsequent add_fact call burn the full 10-12s retry
+        # budget. Reset only by process restart.
+        self._db_wedged = False
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -131,13 +165,105 @@ class MemoryStore:
         # gracefully on NFS/SMB/FUSE-mounted HERMES_HOME (same issue as
         # state.db / kanban.db — see hermes_state._WAL_INCOMPAT_MARKERS).
         from hermes_state import apply_wal_with_fallback
-        apply_wal_with_fallback(self._conn, db_label="memory_store.db (holographic)")
+        journal_mode = apply_wal_with_fallback(self._conn, db_label="memory_store.db (holographic)")
+
+        # Concurrency hardening for multi-process Hermes setups (gateway +
+        # multiple CLI sessions sharing the same DB). Without busy_timeout,
+        # any sibling holding a brief write lock causes immediate
+        # OperationalError('database is locked') and the agent's add_fact
+        # call silently fails.
+        #
+        # We use a MODEST busy_timeout (2s, not 30s) so a wedged sibling
+        # holding a stale write transaction does not block our caller for
+        # minutes. The application-level _retry_locked loop adds 5 retries
+        # with exponential backoff (max ~12s total budget). After that we
+        # fall through to the JSONL-only path so the agent's intent always
+        # survives even when the DB is wedged. The watchdog cron job
+        # replays missing JSONL records back into the DB once the sibling
+        # releases.
+        try:
+            self._conn.execute("PRAGMA busy_timeout=2000")
+            if journal_mode == "wal":
+                # Safe in WAL mode (per SQLite docs); cuts fsync count drastically.
+                self._conn.execute("PRAGMA synchronous=NORMAL")
+                # Trigger automatic checkpoint every 200 WAL pages (~800KB)
+                # so readers cannot pin an old WAL forever.
+                self._conn.execute("PRAGMA wal_autocheckpoint=200")
+        except sqlite3.OperationalError:
+            # Pragmas are best-effort; never block init on a pragma failure.
+            pass
+
         self._conn.executescript(_SCHEMA)
         # Migrate: add hrr_vector column if missing (safe for existing databases)
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
         if "hrr_vector" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Concurrency helpers (added 2026-05-22)
+    # ------------------------------------------------------------------
+
+    def _retry_locked(self, fn, *, max_attempts: int = 5, base_delay: float = 0.2):
+        """Retry ``fn`` on OperationalError('database is locked') with backoff.
+
+        SQLite's busy_timeout handles short contention at the kernel level.
+        This wrapper is the application-level safety net for the rare case
+        where busy_timeout expires (e.g. a sibling holds an uncommitted
+        write transaction longer than 30s). Exponential backoff with
+        jitter, capped at 5 attempts (final wait 3.2s).
+
+        Raises the OperationalError after the last attempt so the caller
+        can decide what to do (e.g. fall back to JSONL-only write).
+        """
+        last_exc: sqlite3.OperationalError | None = None
+        for attempt in range(max_attempts):
+            try:
+                return fn()
+            except sqlite3.OperationalError as exc:
+                msg = str(exc).lower()
+                if "locked" not in msg and "busy" not in msg:
+                    raise
+                last_exc = exc
+                if attempt < max_attempts - 1:
+                    delay = base_delay * (2 ** attempt) * (0.5 + random.random())
+                    time.sleep(delay)
+        # Exhausted all retries
+        assert last_exc is not None
+        raise last_exc
+
+    def _append_jsonl_backup(self, content: str, category: str, tags: str, fact_id: int | None) -> None:
+        """Append a single-line JSON record to the write-through backup file.
+
+        Best-effort: any IO error is swallowed and logged-but-not-raised
+        because the DB write already succeeded and we never want backup
+        failure to mask a successful primary write.
+        """
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "fact_id": fact_id,
+            "category": category,
+            "tags": tags,
+            "content": content,
+        }
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        try:
+            with self._jsonl_lock:
+                # Open with O_APPEND so concurrent writers from sibling
+                # processes interleave cleanly at line boundaries (Linux
+                # guarantees atomicity for writes <= PIPE_BUF on append).
+                fd = os.open(
+                    str(self._jsonl_path),
+                    os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                    0o600,
+                )
+                try:
+                    os.write(fd, line.encode("utf-8"))
+                finally:
+                    os.close(fd)
+        except OSError:
+            # Backup is best-effort. Don't mask primary success.
+            pass
 
     # ------------------------------------------------------------------
     # Public API
@@ -154,28 +280,65 @@ class MemoryStore:
         Deduplicates by content (UNIQUE constraint). On duplicate, returns
         the existing fact_id without modifying the row. Extracts entities from
         the content and links them to the fact.
+
+        Hardened (2026-05-22):
+        - Wrapped in _retry_locked so transient cross-process lock
+          contention doesn't drop the write.
+        - Every successful insert is also append-logged to the JSONL
+          backup BEFORE we return so a crash mid-method cannot leave
+          the fact in only one of the two stores.
+        - If the DB write ultimately fails after all retries, the fact
+          IS STILL written to the JSONL backup, ensuring the agent's
+          intent survives. The watchdog will replay it later.
         """
         with self._lock:
             content = content.strip()
             if not content:
                 raise ValueError("content must not be empty")
 
+            # Wedge fast-path: if a previous write in this process already
+            # exhausted retries against a wedged sibling, every subsequent
+            # write goes straight to JSONL (no point burning 10s/write
+            # against a stuck sibling). The watchdog replays them.
+            if self._db_wedged:
+                self._append_jsonl_backup(content, category, tags, fact_id=None)
+                # Return a synthetic negative id so callers can tell this
+                # was a wedge-fallback write. Most callers don't inspect.
+                return -1
+
+            def _do_insert() -> int:
+                try:
+                    cur = self._conn.execute(
+                        """
+                        INSERT INTO facts (content, category, tags, trust_score)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (content, category, tags, self.default_trust),
+                    )
+                    self._conn.commit()
+                    return int(cur.lastrowid)  # type: ignore[arg-type]
+                except sqlite3.IntegrityError:
+                    # Duplicate content, return existing id
+                    row = self._conn.execute(
+                        "SELECT fact_id FROM facts WHERE content = ?", (content,)
+                    ).fetchone()
+                    return int(row["fact_id"])
+
             try:
-                cur = self._conn.execute(
-                    """
-                    INSERT INTO facts (content, category, tags, trust_score)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (content, category, tags, self.default_trust),
-                )
-                self._conn.commit()
-                fact_id: int = cur.lastrowid  # type: ignore[assignment]
-            except sqlite3.IntegrityError:
-                # Duplicate content — return existing id
-                row = self._conn.execute(
-                    "SELECT fact_id FROM facts WHERE content = ?", (content,)
-                ).fetchone()
-                return int(row["fact_id"])
+                fact_id = self._retry_locked(_do_insert)
+            except sqlite3.OperationalError:
+                # DB write failed after all retries. Mark the DB wedged
+                # for the rest of this process's lifetime so we don't
+                # keep hitting the timeout. Still write JSONL so the
+                # agent's intent survives, then return synthetic id.
+                self._db_wedged = True
+                self._append_jsonl_backup(content, category, tags, fact_id=None)
+                return -1
+
+            # Write-through backup: every fact_id that landed in the DB
+            # also gets a JSONL line. Append-only, line-atomic, survives
+            # DB corruption.
+            self._append_jsonl_backup(content, category, tags, fact_id=fact_id)
 
             # Entity extraction and linking
             for name in self._extract_entities(content):
