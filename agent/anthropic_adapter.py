@@ -643,6 +643,8 @@ def build_anthropic_client(
     timeout: float = None,
     *,
     drop_context_1m_beta: bool = False,
+    default_headers: dict = None,
+    verify: bool = True,
 ):
     """Create an Anthropic client, auto-detecting setup-tokens vs API keys.
 
@@ -753,6 +755,40 @@ def build_anthropic_client(
         kwargs["api_key"] = api_key
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
+
+    # ── Auto-resolve custom gateway headers from config ──────────────
+    # When the caller doesn't supply explicit default_headers, check if
+    # the base_url matches a custom_providers entry with custom_headers
+    # (e.g. AMD APIM gateway needing Ocp-Apim-Subscription-Key).
+    # This is the ROOT fix: every code path that builds an Anthropic
+    # client for a custom gateway auto-injects the subscription key,
+    # eliminating per-callsite patches.
+    if not (isinstance(default_headers, dict) and default_headers):
+        try:
+            from hermes_cli.runtime_provider import resolve_custom_gateway_headers as _rcgh
+            _auto_headers, _auto_verify = _rcgh(normalized_base_url or base_url)
+            if _auto_headers:
+                default_headers = _auto_headers
+            if _auto_verify is False and verify:
+                verify = _auto_verify
+        except Exception:
+            pass  # Config unavailable during early bootstrap
+
+    # Caller-supplied headers (e.g. custom gateway auth keys)
+    # win over our defaults so users can override anthropic-beta, user-agent, etc.
+    if isinstance(default_headers, dict) and default_headers:
+        merged = dict(kwargs.get("default_headers") or {})
+        merged.update({k: v for k, v in default_headers.items() if v is not None})
+        kwargs["default_headers"] = merged
+
+    # When verify=False (e.g. self-signed cert on local proxy), create a
+    # custom httpx client that skips SSL verification.
+    if not verify:
+        from httpx import Client as _HttpxClient
+        kwargs["http_client"] = _HttpxClient(
+            verify=False,
+            timeout=kwargs.pop("timeout"),
+        )
 
     return _anthropic_sdk.Anthropic(**kwargs)
 
