@@ -33,7 +33,8 @@ def clarify_callback(cli, question, choices):
         "selected": 0,
         "response_queue": response_queue,
     }
-    cli._clarify_deadline = _time.monotonic() + timeout
+    # timeout <= 0 means wait indefinitely
+    cli._clarify_deadline = (_time.monotonic() + timeout) if timeout > 0 else 0
     cli._clarify_freetext = is_open_ended
 
     if hasattr(cli, "_app") and cli._app:
@@ -45,9 +46,10 @@ def clarify_callback(cli, question, choices):
             cli._clarify_deadline = 0
             return result
         except queue.Empty:
-            remaining = cli._clarify_deadline - _time.monotonic()
-            if remaining <= 0:
-                break
+            if timeout > 0:
+                remaining = cli._clarify_deadline - _time.monotonic()
+                if remaining <= 0:
+                    break
             if hasattr(cli, "_app") and cli._app:
                 cli._app.invalidate()
 
@@ -214,7 +216,8 @@ def approval_callback(cli, command: str, description: str) -> str:
             "selected": 0,
             "response_queue": response_queue,
         }
-        cli._approval_deadline = _time.monotonic() + timeout
+        # timeout <= 0 means wait indefinitely
+        cli._approval_deadline = (_time.monotonic() + timeout) if timeout > 0 else 0
 
         if hasattr(cli, "_app") and cli._app:
             cli._app.invalidate()
@@ -228,9 +231,10 @@ def approval_callback(cli, command: str, description: str) -> str:
                     cli._app.invalidate()
                 return result
             except queue.Empty:
-                remaining = cli._approval_deadline - _time.monotonic()
-                if remaining <= 0:
-                    break
+                if timeout > 0:
+                    remaining = cli._approval_deadline - _time.monotonic()
+                    if remaining <= 0:
+                        break
                 if hasattr(cli, "_app") and cli._app:
                     cli._app.invalidate()
 

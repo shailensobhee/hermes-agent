@@ -10837,7 +10837,8 @@ class HermesCLI:
             "selected": 0,
             "response_queue": response_queue,
         }
-        self._clarify_deadline = _time.monotonic() + timeout
+        # timeout <= 0 means wait indefinitely
+        self._clarify_deadline = (_time.monotonic() + timeout) if timeout > 0 else 0
         # Open-ended questions skip straight to freetext input
         self._clarify_freetext = is_open_ended
 
@@ -10860,9 +10861,10 @@ class HermesCLI:
                 self._clarify_deadline = 0
                 return result
             except queue.Empty:
-                remaining = self._clarify_deadline - _time.monotonic()
-                if remaining <= 0:
-                    break
+                if timeout > 0:
+                    remaining = self._clarify_deadline - _time.monotonic()
+                    if remaining <= 0:
+                        break
                 # Only repaint every 5 s for the countdown — avoids flicker
                 now = _time.monotonic()
                 if now - _last_countdown_refresh >= 5.0:
@@ -10957,7 +10959,8 @@ class HermesCLI:
                 "selected": 0,
                 "response_queue": response_queue,
             }
-            self._approval_deadline = _time.monotonic() + timeout
+            # timeout <= 0 means wait indefinitely
+            self._approval_deadline = (_time.monotonic() + timeout) if timeout > 0 else 0
 
             self._invalidate()
 
@@ -10970,9 +10973,10 @@ class HermesCLI:
                     self._invalidate()
                     return result
                 except queue.Empty:
-                    remaining = self._approval_deadline - _time.monotonic()
-                    if remaining <= 0:
-                        break
+                    if timeout > 0:
+                        remaining = self._approval_deadline - _time.monotonic()
+                        if remaining <= 0:
+                            break
                     now = _time.monotonic()
                     if now - _last_countdown_refresh >= 5.0:
                         _last_countdown_refresh = now
