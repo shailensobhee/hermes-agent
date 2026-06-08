@@ -6234,6 +6234,103 @@ def test_slash_worker_close_reaps_zombie_and_closes_fds():
     assert calls["stdin"] == calls["stdout"] == calls["stderr"] == 1
 
 
+class _CapturePopen:
+    """Records argv passed to subprocess.Popen and returns a no-op stub."""
+
+    captured_argv: list[list[str]] = []
+
+    def __init__(self, argv, **_kwargs):
+        type(self).captured_argv.append(list(argv))
+        self.stdin = self.stdout = self.stderr = None
+
+    def poll(self):
+        return 0
+
+
+def _patch_slash_worker_popen(monkeypatch):
+    """Common harness: replace Popen + the drain threads so _SlashWorker.__init__
+    can run end-to-end in a unit test without actually spawning anything."""
+    _CapturePopen.captured_argv.clear()
+    monkeypatch.setattr(server.subprocess, "Popen", _CapturePopen)
+    monkeypatch.setattr(server.threading, "Thread", lambda *a, **kw: type(
+        "DummyThread", (), {"start": lambda self: None}
+    )())
+
+
+def test_slash_worker_no_systemd_run_wrap_by_default(monkeypatch):
+    """HERMES_TUI_WORKER_SLICE unset → argv stays as plain python -m tui_gateway.slash_worker."""
+    _patch_slash_worker_popen(monkeypatch)
+    monkeypatch.delenv("HERMES_TUI_WORKER_SLICE", raising=False)
+
+    server._SlashWorker(session_key="abc123", model="claude-3")
+
+    assert len(_CapturePopen.captured_argv) == 1
+    argv = _CapturePopen.captured_argv[0]
+    assert argv[0] == sys.executable
+    assert argv[1] == "-m"
+    assert argv[2] == "tui_gateway.slash_worker"
+    assert "systemd-run" not in argv
+
+
+def test_slash_worker_wraps_with_systemd_run_when_env_set(monkeypatch):
+    """HERMES_TUI_WORKER_SLICE=name → argv prefixed with systemd-run --user --scope --slice=name --."""
+    _patch_slash_worker_popen(monkeypatch)
+    monkeypatch.setenv("HERMES_TUI_WORKER_SLICE", "hermes-workers.slice")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.setattr(server.shutil, "which", lambda name: "/usr/bin/systemd-run" if name == "systemd-run" else None)
+
+    server._SlashWorker(session_key="abc123", model="claude-3")
+
+    assert len(_CapturePopen.captured_argv) == 1
+    argv = _CapturePopen.captured_argv[0]
+    assert argv[:6] == [
+        "systemd-run", "--user", "--scope", "--quiet",
+        "--slice=hermes-workers.slice", "--",
+    ]
+    # Original argv preserved after the separator
+    assert argv[6] == sys.executable
+    assert "tui_gateway.slash_worker" in argv
+
+
+def test_slash_worker_skips_wrap_when_systemd_run_missing(monkeypatch):
+    """systemd-run not on PATH (e.g. macOS) → silently fall back to plain Popen."""
+    _patch_slash_worker_popen(monkeypatch)
+    monkeypatch.setenv("HERMES_TUI_WORKER_SLICE", "hermes-workers.slice")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.setattr(server.shutil, "which", lambda _: None)
+
+    server._SlashWorker(session_key="abc123", model="claude-3")
+
+    argv = _CapturePopen.captured_argv[0]
+    assert "systemd-run" not in argv
+
+
+def test_slash_worker_skips_wrap_when_no_xdg_runtime_dir(monkeypatch):
+    """XDG_RUNTIME_DIR unset (not in a logind session) → silently fall back."""
+    _patch_slash_worker_popen(monkeypatch)
+    monkeypatch.setenv("HERMES_TUI_WORKER_SLICE", "hermes-workers.slice")
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(server.shutil, "which", lambda name: "/usr/bin/systemd-run")
+
+    server._SlashWorker(session_key="abc123", model="claude-3")
+
+    argv = _CapturePopen.captured_argv[0]
+    assert "systemd-run" not in argv
+
+
+def test_slash_worker_skips_wrap_when_env_empty_string(monkeypatch):
+    """HERMES_TUI_WORKER_SLICE="" (or whitespace) → treated as unset."""
+    _patch_slash_worker_popen(monkeypatch)
+    monkeypatch.setenv("HERMES_TUI_WORKER_SLICE", "   ")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.setattr(server.shutil, "which", lambda name: "/usr/bin/systemd-run")
+
+    server._SlashWorker(session_key="abc123", model="claude-3")
+
+    argv = _CapturePopen.captured_argv[0]
+    assert "systemd-run" not in argv
+
+
 def test_close_session_by_id_is_idempotent_and_full(monkeypatch):
     """One call tears the session down fully; a second is a no-op."""
     calls = {"worker": 0, "agent": 0, "unreg": 0, "finalize": 0}

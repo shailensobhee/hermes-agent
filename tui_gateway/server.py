@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -242,6 +243,37 @@ class _SlashWorker:
         ]
         if model:
             argv += ["--model", model]
+
+        # Opt-in: wrap argv with `systemd-run --user --scope` so the worker
+        # subprocess lands in a sibling cgroup of the dashboard, NOT inside
+        # the dashboard's own cgroup. Without this, every worker eats into
+        # whatever MemoryMax the dashboard service is running under — which
+        # starves plugin endpoints (notably hermes-achievements, which loads
+        # ~8 MB of snapshot JSON per request) and produces opaque 500s when
+        # the cgroup hits its limit.
+        #
+        # Set HERMES_TUI_WORKER_SLICE=<slice-name> in the dashboard's
+        # systemd unit to enable. The slice must already exist (typically
+        # `hermes-workers.slice` in ~/.config/systemd/user/).
+        #
+        # Silently no-op when:
+        #   - env var unset (default; preserves existing behaviour)
+        #   - systemd-run not on PATH (e.g. macOS, non-systemd Linux)
+        #   - we're not running under a systemd user manager
+        #
+        # Background mode (--unit) was rejected in favour of --scope so the
+        # worker inherits the dashboard's stdin/stdout pipes (subprocess.PIPE
+        # requires the child be a direct descendant, which --scope keeps).
+        worker_slice = os.environ.get("HERMES_TUI_WORKER_SLICE", "").strip()
+        if worker_slice and shutil.which("systemd-run") and os.environ.get("XDG_RUNTIME_DIR"):
+            argv = [
+                "systemd-run",
+                "--user",
+                "--scope",
+                "--quiet",
+                f"--slice={worker_slice}",
+                "--",
+            ] + argv
 
         self._closed = False
         self.proc = subprocess.Popen(
