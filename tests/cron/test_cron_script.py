@@ -203,6 +203,51 @@ class TestBuildJobPromptWithScript:
         assert "not found" in prompt.lower()
         assert "Report status." in prompt
 
+    def test_script_failure_sets_marker_on_job_dict(self, cron_env):
+        """When the pre-run script fails, _build_job_prompt must attach
+        job['_script_failed']=True so _process_job can plumb it through to
+        mark_job_run for distinct last_status reporting."""
+        from cron.scheduler import _build_job_prompt
+
+        job = {
+            "prompt": "Report status.",
+            "script": "nonexistent_monitor.py",
+        }
+        assert "_script_failed" not in job  # baseline
+        _ = _build_job_prompt(job)
+        assert job.get("_script_failed") is True
+
+    def test_script_success_does_not_set_marker(self, cron_env):
+        """Successful scripts must not leave a stale failure marker on the job."""
+        from cron.scheduler import _build_job_prompt
+
+        script = cron_env / "scripts" / "good.py"
+        script.write_text('print("all clear")\n')
+
+        job = {
+            "prompt": "Report.",
+            "script": str(script),
+        }
+        _ = _build_job_prompt(job)
+        assert job.get("_script_failed") is None
+
+    def test_script_error_prompt_forbids_speculation(self, cron_env):
+        """The agent prompt for a failed script must explicitly tell the
+        agent NOT to invent transient-failure narratives that hide the
+        real cause from the user."""
+        from cron.scheduler import _build_job_prompt
+
+        job = {
+            "prompt": "Report status.",
+            "script": "nonexistent_monitor.py",
+        }
+        prompt = _build_job_prompt(job).lower()
+        # Anti-speculation guidance is essential — without it the agent
+        # tends to soothe with "probably network", "will retry", etc.
+        assert "do not speculate" in prompt or "verbatim" in prompt
+        # Surface the script path so the user knows which script broke
+        assert "nonexistent_monitor.py" in prompt
+
     def test_no_script_unchanged(self, cron_env):
         from cron.scheduler import _build_job_prompt
 

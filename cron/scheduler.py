@@ -1141,10 +1141,35 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
                 # Script produced no output — nothing to report, skip AI call.
                 return None
         else:
+            # Script failed. Two concerns:
+            #
+            # 1. The agent SHOULDN'T speculate about WHY the script failed —
+            #    it has no way to know if this is transient (network) or a
+            #    permanent config breakage (e.g. a renamed git remote). A
+            #    soothing "will retry automatically" message hides chronic
+            #    failures for days. Tell the agent to surface the raw error
+            #    verbatim and ONLY report what the script actually output.
+            #
+            # 2. We attach a transient marker to the job dict so the caller
+            #    (e.g. _process_job in the scheduler) can plumb the script
+            #    failure through to mark_job_run() and set last_status to
+            #    "ok_script_failed" instead of plain "ok". Otherwise a daily
+            #    cron whose pre-run script has been broken for a week looks
+            #    like 7 consecutive successful runs in `hermes cron list`.
+            job["_script_failed"] = True
             prompt = (
                 "## Script Error\n"
-                "The data-collection script failed. Report this to the user.\n\n"
-                f"```\n{script_output}\n```\n\n"
+                "The data-collection script FAILED. Your job is to surface "
+                "the failure to the user CLEARLY and VERBATIM so they can "
+                "diagnose it. Do NOT speculate about causes ('GitHub probably "
+                "down', 'transient network issue', 'will retry automatically') "
+                "— you have no way to verify any of that. Quote the raw script "
+                "output below as-is, identify the script name, and stop. The "
+                "user will investigate.\n\n"
+                f"Script: `{script_path}`\n\n"
+                "```\n"
+                f"{script_output}\n"
+                "```\n\n"
                 f"{prompt}"
             )
 
@@ -2126,7 +2151,21 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                     success = False
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
-                mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+                # If the pre-run script failed, the agent still ran (to report
+                # the failure to the user via _build_job_prompt's "## Script
+                # Error" branch). The cron tick succeeded end-to-end, so
+                # success stays True and delivery happens. BUT we want
+                # `hermes cron list` to flag this distinctly from a clean
+                # "ok" so a chronically broken script doesn't hide for days.
+                # _build_job_prompt sets job["_script_failed"]=True when the
+                # script's exit code was non-zero.
+                script_failed = bool(job.pop("_script_failed", False))
+
+                mark_job_run(
+                    job["id"], success, error,
+                    delivery_error=delivery_error,
+                    script_failed=script_failed,
+                )
                 return True
 
             except Exception as e:

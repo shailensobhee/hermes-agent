@@ -908,7 +908,8 @@ def remove_job(job_id: str) -> bool:
 
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+                 delivery_error: Optional[str] = None,
+                 script_failed: bool = False):
     """
     Mark a job as having been run.
     
@@ -917,6 +918,14 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
 
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
+
+    ``script_failed`` is set when a pre-run data-collection script (the
+    ``script`` field on jobs that are NOT ``no_agent``) exited non-zero.
+    The cron tick itself still succeeds because the agent runs to surface
+    the error to the user, but ``last_status`` is set to
+    ``"ok_script_failed"`` instead of ``"ok"`` so a chronically broken
+    pre-run script is visible in ``hermes cron list`` after a single run
+    rather than hiding behind days of "ok" rows.
     """
     with _jobs_file_lock:
         jobs = load_jobs()
@@ -924,7 +933,16 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
             if job["id"] == job_id:
                 now = _hermes_now().isoformat()
                 job["last_run_at"] = now
-                job["last_status"] = "ok" if success else "error"
+                if not success:
+                    job["last_status"] = "error"
+                elif script_failed:
+                    # Agent ran successfully (to report the failure) but the
+                    # pre-run script broke. Distinct status keeps this visible
+                    # in `hermes cron list` so a chronic script failure isn't
+                    # papered over by the agent's report-delivery being "ok".
+                    job["last_status"] = "ok_script_failed"
+                else:
+                    job["last_status"] = "ok"
                 job["last_error"] = error if not success else None
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error

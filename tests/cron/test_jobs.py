@@ -502,6 +502,46 @@ class TestMarkJobRun:
         assert updated["last_error"] == "model timeout"
         assert updated["last_delivery_error"] == "platform 'discord' not enabled"
 
+    def test_script_failed_sets_distinct_status(self, tmp_cron_dir):
+        """When the pre-run script fails but the agent ran successfully to
+        report the failure, last_status is 'ok_script_failed' — NOT 'ok'
+        and NOT 'error'. This keeps a chronically broken pre-run script
+        visible in `hermes cron list` after a single run.
+        """
+        job = create_job(prompt="Report", schedule="every 1h")
+        mark_job_run(job["id"], success=True, script_failed=True)
+        updated = get_job(job["id"])
+        assert updated["last_status"] == "ok_script_failed"
+        assert updated["last_error"] is None  # agent ran fine, no agent error
+
+    def test_script_failed_default_false_preserves_ok(self, tmp_cron_dir):
+        """Default behaviour for a clean run is unchanged — last_status='ok'."""
+        job = create_job(prompt="Report", schedule="every 1h")
+        mark_job_run(job["id"], success=True)
+        updated = get_job(job["id"])
+        assert updated["last_status"] == "ok"
+
+    def test_script_failed_with_agent_error_still_error(self, tmp_cron_dir):
+        """If the agent itself failed, that's the dominant status — script
+        failure is moot because the agent didn't run to surface it. We must
+        not weaken 'error' to 'ok_script_failed' in this case."""
+        job = create_job(prompt="Report", schedule="every 1h")
+        mark_job_run(job["id"], success=False, error="agent crashed", script_failed=True)
+        updated = get_job(job["id"])
+        assert updated["last_status"] == "error"
+        assert updated["last_error"] == "agent crashed"
+
+    def test_script_failed_status_clears_on_next_clean_run(self, tmp_cron_dir):
+        """ok_script_failed must not be sticky — a subsequent clean run
+        flips it back to plain 'ok' so transient script failures auto-heal
+        in the status view."""
+        job = create_job(prompt="Report", schedule="every 1h")
+        mark_job_run(job["id"], success=True, script_failed=True)
+        assert get_job(job["id"])["last_status"] == "ok_script_failed"
+        # Next run, script works again
+        mark_job_run(job["id"], success=True, script_failed=False)
+        assert get_job(job["id"])["last_status"] == "ok"
+
     def test_recurring_cron_not_disabled_when_croniter_missing(self, tmp_cron_dir, monkeypatch):
         """Regression test for issue #16265.
 
