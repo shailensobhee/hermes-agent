@@ -607,7 +607,14 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         provider_key = str(entry.get("provider_key", "") or "").strip()
         provider_key_norm = _normalize_custom_provider_name(provider_key) if provider_key else ""
         provider_menu_key = f"custom:{provider_key_norm}" if provider_key_norm else ""
-        if requested_norm not in {name_norm, menu_key, provider_key_norm, provider_menu_key}:
+        # Also match on the stable "id" field (e.g. "amd-llm-gateway-anthropic")
+        entry_id = str(entry.get("id", "") or "").strip()
+        entry_id_norm = _normalize_custom_provider_name(entry_id) if entry_id else ""
+        entry_id_menu = f"custom:{entry_id_norm}" if entry_id_norm else ""
+        match_set = {name_norm, menu_key, provider_key_norm, provider_menu_key,
+                     entry_id_norm, entry_id_menu}
+        match_set.discard("")
+        if requested_norm not in match_set:
             continue
         result = {
             "name": name.strip(),
@@ -1692,3 +1699,41 @@ def format_runtime_provider_error(error: Exception) -> str:
     if isinstance(error, AuthError):
         return format_auth_error(error)
     return str(error)
+
+
+def resolve_custom_gateway_headers(base_url: str):
+    """Look up custom_headers + verify for *base_url* in custom_providers.
+
+    Returns ``(headers_dict | None, verify_bool | None)``.  Both may be
+    ``None`` when no entry matches the given base_url.  Case-insensitive
+    URL matching with trailing slash stripped on both sides.
+
+    Used by ``build_anthropic_client()`` to auto-inject APIM subscription
+    keys (e.g. ``Ocp-Apim-Subscription-Key``) without requiring every
+    caller to explicitly forward headers.
+    """
+    if not base_url:
+        return None, None
+    try:
+        config = load_config()
+    except Exception:
+        return None, None
+
+    my_base = base_url.rstrip("/").lower()
+    providers = get_compatible_custom_providers(config)
+    if not providers:
+        return None, None
+
+    for entry in providers:
+        if not isinstance(entry, dict):
+            continue
+        entry_base = (entry.get("base_url") or "").rstrip("/").lower()
+        if not entry_base or entry_base != my_base:
+            continue
+        headers = entry.get("custom_headers")
+        if isinstance(headers, dict) and headers:
+            verify = entry.get("verify")
+            if verify is not None:
+                verify = bool(verify)
+            return dict(headers), verify
+    return None, None

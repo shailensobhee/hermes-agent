@@ -9023,6 +9023,35 @@ class HermesCLI:
             from hermes_cli.config import reload_env
             count = reload_env()
             print(f"  Reloaded .env ({count} var(s) updated)")
+        elif canonical == "reload-config":
+            # Re-read ~/.hermes/config.yaml into the in-memory CLI_CONFIG dict.
+            # Without this, `hermes config set <k> <v>` writes to disk but
+            # subsystems that read CLI_CONFIG.get(...) at request time (the
+            # approval prompt, clarify prompt, display settings, ...) keep
+            # using stale values until the next CLI restart.
+            #
+            # We MUTATE the existing dict (clear+update) instead of rebinding
+            # the global, so every module that imported `from cli import CLI_CONFIG`
+            # at startup sees the new values without re-importing.
+            global CLI_CONFIG
+            fresh = load_cli_config()
+            old_keys = set(CLI_CONFIG.keys())
+            new_keys = set(fresh.keys())
+            CLI_CONFIG.clear()
+            CLI_CONFIG.update(fresh)
+            added = sorted(new_keys - old_keys)
+            removed = sorted(old_keys - new_keys)
+            print(f"  Reloaded ~/.hermes/config.yaml ({len(CLI_CONFIG)} top-level keys)")
+            if added:
+                print(f"  + added: {', '.join(added)}")
+            if removed:
+                print(f"  - removed: {', '.join(removed)}")
+            # Re-init the skin engine since display.skin may have changed.
+            try:
+                from hermes_cli.skin_engine import init_skin_from_config
+                init_skin_from_config(CLI_CONFIG)
+            except Exception as e:
+                print(f"  (skin re-init failed, ignoring: {e})")
         elif canonical == "reload-mcp":
             # Interactive reload: confirm first (unless the user has opted out).
             # The auto-reload path (file watcher) calls _reload_mcp directly
@@ -11701,7 +11730,8 @@ class HermesCLI:
             "selected": 0,
             "response_queue": response_queue,
         }
-        self._clarify_deadline = _time.monotonic() + timeout
+        # timeout <= 0 means wait indefinitely
+        self._clarify_deadline = (_time.monotonic() + timeout) if timeout > 0 else 0
         # Open-ended questions skip straight to freetext input
         self._clarify_freetext = is_open_ended
 
@@ -11724,9 +11754,10 @@ class HermesCLI:
                 self._clarify_deadline = 0
                 return result
             except queue.Empty:
-                remaining = self._clarify_deadline - _time.monotonic()
-                if remaining <= 0:
-                    break
+                if timeout > 0:
+                    remaining = self._clarify_deadline - _time.monotonic()
+                    if remaining <= 0:
+                        break
                 # Only repaint every 5 s for the countdown — avoids flicker
                 now = _time.monotonic()
                 if now - _last_countdown_refresh >= 5.0:
@@ -11821,7 +11852,8 @@ class HermesCLI:
                 "selected": 0,
                 "response_queue": response_queue,
             }
-            self._approval_deadline = _time.monotonic() + timeout
+            # timeout <= 0 means wait indefinitely
+            self._approval_deadline = (_time.monotonic() + timeout) if timeout > 0 else 0
 
             self._invalidate()
 
@@ -11834,9 +11866,10 @@ class HermesCLI:
                     self._invalidate()
                     return result
                 except queue.Empty:
-                    remaining = self._approval_deadline - _time.monotonic()
-                    if remaining <= 0:
-                        break
+                    if timeout > 0:
+                        remaining = self._approval_deadline - _time.monotonic()
+                        if remaining <= 0:
+                            break
                     now = _time.monotonic()
                     if now - _last_countdown_refresh >= 5.0:
                         _last_countdown_refresh = now

@@ -118,6 +118,96 @@ class TestCliApprovalUi:
         thread.join(timeout=2)
         assert result["value"] == "deny"
 
+    def test_approval_callback_timeout_zero_waits_indefinitely(self):
+        """timeout=0 in config means 'wait forever' — NOT 'instantly deny'.
+
+        Regression for the silent-deny bug: when users set
+        ``approvals.timeout: 0`` in config.yaml (a common request — "ask me,
+        don't time out"), the previous code computed
+        ``deadline = monotonic() + 0`` and the polling loop immediately
+        broke out with ``remaining <= 0``, returning "deny" before the
+        user ever saw the prompt.
+        """
+        cli = _make_cli_stub()
+        result = {}
+
+        with patch.dict(
+            cli_module.CLI_CONFIG,
+            {"approvals": {"mode": "manual", "timeout": 0, "cron_mode": "deny"}},
+        ):
+
+            def _run_callback():
+                result["value"] = cli._approval_callback("rm -rf /tmp/foo", "cleanup")
+
+            thread = threading.Thread(target=_run_callback, daemon=True)
+            thread.start()
+
+            # Prompt must appear (state set), and the thread must NOT
+            # terminate on its own — we want it blocked until we respond.
+            deadline = time.time() + 2
+            while cli._approval_state is None and time.time() < deadline:
+                time.sleep(0.01)
+
+            assert cli._approval_state is not None, "approval prompt never appeared"
+            # deadline of 0 sentinel = no deadline (wait indefinitely)
+            assert cli._approval_deadline == 0
+
+            # Give the polling loop a fair amount of wall time to incorrectly
+            # break out. If the bug regresses, the thread is already dead by
+            # now and we'll observe result["value"] == "deny" without us
+            # having sent anything.
+            time.sleep(1.5)
+            assert "value" not in result, (
+                "callback returned before user responded — timeout=0 should wait"
+            )
+            assert thread.is_alive(), "callback thread terminated early on timeout=0"
+
+            # Now actually respond — callback should return our choice.
+            cli._approval_state["response_queue"].put("once")
+            thread.join(timeout=2)
+
+        assert result["value"] == "once"
+
+    def test_clarify_callback_timeout_zero_waits_indefinitely(self):
+        """Same regression as the approval one, but for clarify_callback."""
+        cli = _make_cli_stub()
+        cli._clarify_state = None
+        cli._clarify_deadline = 0
+        cli._clarify_freetext = False
+        result = {}
+
+        from hermes_cli import callbacks as callbacks_mod
+
+        with patch.dict(
+            cli_module.CLI_CONFIG, {"clarify": {"timeout": 0}}
+        ), patch.object(callbacks_mod, "cprint"):
+
+            def _run_callback():
+                result["value"] = callbacks_mod.clarify_callback(
+                    cli, "pick one", ["a", "b"]
+                )
+
+            thread = threading.Thread(target=_run_callback, daemon=True)
+            thread.start()
+
+            deadline = time.time() + 2
+            while cli._clarify_state is None and time.time() < deadline:
+                time.sleep(0.01)
+
+            assert cli._clarify_state is not None
+            assert cli._clarify_deadline == 0
+
+            time.sleep(1.5)
+            assert "value" not in result, (
+                "clarify returned before user responded — timeout=0 should wait"
+            )
+            assert thread.is_alive()
+
+            cli._clarify_state["response_queue"].put("a")
+            thread.join(timeout=2)
+
+        assert result["value"] == "a"
+
     def test_handle_approval_selection_view_expands_in_place(self):
         cli = _make_cli_stub()
         cli._approval_state = {
