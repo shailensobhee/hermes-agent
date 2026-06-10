@@ -703,6 +703,8 @@ def build_anthropic_client(
     timeout: float = None,
     *,
     drop_context_1m_beta: bool = False,
+    default_headers: dict = None,
+    verify: bool = True,
 ):
     """Create an Anthropic client, auto-detecting setup-tokens vs API keys.
 
@@ -813,6 +815,38 @@ def build_anthropic_client(
         kwargs["api_key"] = api_key
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
+
+    # -- Custom gateway header auto-resolution --
+    # Enterprise APIM gateways (Azure APIM, AMD LLM Gateway) require
+    # extra headers (e.g. Ocp-Apim-Subscription-Key) on every request.
+    # Auto-resolve from custom_providers config so all 12+ call sites
+    # that invoke build_anthropic_client() get the headers automatically.
+    if default_headers is not None:
+        existing = kwargs.get("default_headers", {})
+        if isinstance(existing, dict):
+            existing.update(default_headers)
+            kwargs["default_headers"] = existing
+        else:
+            kwargs["default_headers"] = default_headers
+    elif normalized_base_url:
+        try:
+            from hermes_cli.runtime_provider import resolve_custom_gateway_headers
+            gw_headers, gw_verify = resolve_custom_gateway_headers(normalized_base_url)
+            if gw_headers:
+                existing = kwargs.get("default_headers", {})
+                if isinstance(existing, dict):
+                    existing.update(gw_headers)
+                    kwargs["default_headers"] = existing
+                else:
+                    kwargs["default_headers"] = dict(gw_headers)
+            if gw_verify is not None:
+                verify = gw_verify
+        except ImportError:
+            pass  # hermes_cli not available in standalone SDK usage
+
+    if not verify:
+        from httpx import Client as _HttpxClient
+        kwargs["http_client"] = _HttpxClient(verify=False)
 
     return _anthropic_sdk.Anthropic(**kwargs)
 

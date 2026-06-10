@@ -3758,6 +3758,7 @@ def _normalize_custom_provider_entry(
         "context_length", "rate_limit_delay",
         "request_timeout_seconds", "stale_timeout_seconds",
         "discover_models", "extra_body",
+        "custom_headers", "verify", "id",
     }
     for camel, snake in _CAMEL_ALIASES.items():
         if camel in entry and snake not in entry:
@@ -3855,6 +3856,18 @@ def _normalize_custom_provider_entry(
     extra_body = entry.get("extra_body")
     if isinstance(extra_body, dict):
         normalized["extra_body"] = dict(extra_body)
+
+    custom_headers = entry.get("custom_headers")
+    if isinstance(custom_headers, dict) and custom_headers:
+        normalized["custom_headers"] = dict(custom_headers)
+
+    verify_val = entry.get("verify")
+    if isinstance(verify_val, bool):
+        normalized["verify"] = verify_val
+
+    entry_id = entry.get("id")
+    if isinstance(entry_id, str) and entry_id.strip():
+        normalized["id"] = entry_id.strip()
 
     return normalized
 

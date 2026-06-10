@@ -533,7 +533,12 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             if not resolved_api_key:
                 resolved_api_key = str(entry.get("api_key", "") or "").strip()
 
-            if requested_norm in {ep_name, name_norm, f"custom:{name_norm}"}:
+            entry_id = str(entry.get("id", "") or "").strip()
+            entry_id_norm = _normalize_custom_provider_name(entry_id) if entry_id else ""
+            match_set = {ep_name, name_norm, f"custom:{name_norm}"}
+            if entry_id_norm:
+                match_set.update({entry_id_norm, f"custom:{entry_id_norm}"})
+            if requested_norm in match_set:
                 # Found match by provider key
                 base_url = entry.get("api") or entry.get("url") or entry.get("base_url") or ""
                 if base_url:
@@ -607,7 +612,14 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         provider_key = str(entry.get("provider_key", "") or "").strip()
         provider_key_norm = _normalize_custom_provider_name(provider_key) if provider_key else ""
         provider_menu_key = f"custom:{provider_key_norm}" if provider_key_norm else ""
-        if requested_norm not in {name_norm, menu_key, provider_key_norm, provider_menu_key}:
+        entry_id = str(entry.get("id", "") or "").strip()
+        entry_id_norm = _normalize_custom_provider_name(entry_id) if entry_id else ""
+        entry_id_menu = f"custom:{entry_id_norm}" if entry_id_norm else ""
+        if requested_norm not in {
+            name_norm, menu_key,
+            provider_key_norm, provider_menu_key,
+            entry_id_norm, entry_id_menu,
+        }:
             continue
         result = {
             "name": name.strip(),
@@ -1692,3 +1704,58 @@ def format_runtime_provider_error(error: Exception) -> str:
     if isinstance(error, AuthError):
         return format_auth_error(error)
     return str(error)
+
+
+def resolve_custom_gateway_headers(base_url: str):
+    """Resolve custom gateway headers for a base URL from custom_providers config.
+
+    Scans get_compatible_custom_providers() for an entry whose base_url
+    matches (case-insensitive, trailing-slash stripped).
+
+    Returns:
+        (headers_dict, verify) where headers_dict is a dict of extra HTTP
+        headers to send, or None if no match. verify is a bool (False to
+        disable SSL verification) or None if not configured.
+    """
+    if not base_url:
+        return None, None
+
+    from hermes_cli.config import load_config, get_compatible_custom_providers
+
+    config = load_config()
+    normalized = base_url.strip().rstrip("/").lower()
+
+    # Check custom_providers list
+    custom_providers = get_compatible_custom_providers(config)
+    for entry in (custom_providers or []):
+        if not isinstance(entry, dict):
+            continue
+        entry_url = (entry.get("base_url") or "").strip().rstrip("/").lower()
+        if not entry_url or entry_url != normalized:
+            continue
+        headers = entry.get("custom_headers")
+        verify_val = entry.get("verify")
+        if isinstance(headers, dict) and headers:
+            return dict(headers), verify_val if isinstance(verify_val, bool) else None
+        if isinstance(verify_val, bool):
+            return None, verify_val
+
+    # Also check providers: dict (new-style)
+    providers = config.get("providers")
+    if isinstance(providers, dict):
+        for _key, entry in providers.items():
+            if not isinstance(entry, dict):
+                continue
+            entry_url = (
+                entry.get("base_url") or entry.get("url") or entry.get("api") or ""
+            ).strip().rstrip("/").lower()
+            if not entry_url or entry_url != normalized:
+                continue
+            headers = entry.get("custom_headers")
+            verify_val = entry.get("verify")
+            if isinstance(headers, dict) and headers:
+                return dict(headers), verify_val if isinstance(verify_val, bool) else None
+            if isinstance(verify_val, bool):
+                return None, verify_val
+
+    return None, None
