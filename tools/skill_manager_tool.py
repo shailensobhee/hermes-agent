@@ -382,6 +382,37 @@ def _curator_consolidation_delete_guard(
 MAX_SKILL_CONTENT_CHARS = 100_000   # ~36k tokens at 2.75 chars/token
 MAX_SKILL_FILE_BYTES = 1_048_576    # 1 MiB per supporting file
 
+
+def _configured_max_content_chars() -> int:
+    """Resolve the SKILL.md write limit, honouring ``skills.max_content_chars``.
+
+    The default exists because a skill is injected into context when loaded, so
+    an unbounded SKILL.md is a real cost. It is a guardrail on agent WRITES, not
+    a storage ceiling: hand-placed skills of any size already load and are
+    returned untruncated by ``skill_view``.
+
+    That asymmetry is the problem this solves. When a legitimately large skill
+    crosses the limit, every patch is refused, including edits that make the
+    file SHORTER, so the skill freezes exactly when it most needs correcting.
+    Operators who accept the context cost can raise the ceiling in config.yaml:
+
+        skills:
+          max_content_chars: 200000
+
+    A non-positive value disables the check entirely. Invalid or unreadable
+    config falls back to the default rather than failing the write.
+    """
+    try:
+        from hermes_cli.config import load_config
+        raw = (load_config().get("skills", {}) or {}).get("max_content_chars")
+        if raw is None:
+            return MAX_SKILL_CONTENT_CHARS
+        limit = int(raw)
+        return limit if limit > 0 else 0
+    except Exception:
+        logger.debug("skills.max_content_chars lookup failed", exc_info=True)
+        return MAX_SKILL_CONTENT_CHARS
+
 # Characters allowed in skill names (filesystem-safe, URL-friendly)
 VALID_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9._-]*$')
 
@@ -471,19 +502,38 @@ def _validate_frontmatter(content: str) -> Optional[str]:
     return None
 
 
-def _validate_content_size(content: str, label: str = "SKILL.md") -> Optional[str]:
+def _validate_content_size(
+    content: str,
+    label: str = "SKILL.md",
+    previous: Optional[str] = None,
+) -> Optional[str]:
     """Check that content doesn't exceed the character limit for agent writes.
+
+    ``previous`` is the current on-disk content, when the caller is editing an
+    existing file. An edit that leaves the file the same size or SMALLER is
+    always allowed, even when it stays above the limit. Without this, a skill
+    that is already oversized cannot be repaired or trimmed by the agent at all,
+    which is the opposite of what the limit is for.
 
     Returns an error message or None if within bounds.
     """
-    if len(content) > MAX_SKILL_CONTENT_CHARS:
-        return (
-            f"{label} content is {len(content):,} characters "
-            f"(limit: {MAX_SKILL_CONTENT_CHARS:,}). "
-            f"Consider splitting into a smaller SKILL.md with supporting files "
-            f"in references/ or templates/."
-        )
-    return None
+    limit = _configured_max_content_chars()
+    if limit <= 0:
+        return None
+    if len(content) <= limit:
+        return None
+    if previous is not None and len(content) <= len(previous):
+        # Already over the limit, but this edit does not make it worse.
+        return None
+    return (
+        f"{label} content is {len(content):,} characters "
+        f"(limit: {limit:,}). "
+        f"Consider splitting into a smaller SKILL.md with supporting files "
+        f"in references/ or templates/. "
+        f"If this skill genuinely needs to be larger, raise the ceiling with "
+        f"`hermes config set skills.max_content_chars <N>` "
+        f"(0 disables the check)."
+    )
 
 
 def _resolve_skill_dir(name: str, category: str = None) -> Path:
@@ -774,13 +824,21 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     if err:
         return {"success": False, "error": err}
 
-    err = _validate_content_size(content)
-    if err:
-        return {"success": False, "error": err}
-
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name)}
+
+    # Read the current text first so a net-shorter rewrite is allowed on a
+    # skill that is already over the limit. Locating the skill has to happen
+    # before the size check for that reason.
+    try:
+        _previous = (Path(existing["path"]) / "SKILL.md").read_text(encoding="utf-8")
+    except Exception:
+        _previous = None
+
+    err = _validate_content_size(content, previous=_previous)
+    if err:
+        return {"success": False, "error": err}
     guard = _background_review_write_guard(name, existing["path"], "edit")
     if guard:
         return guard
@@ -882,9 +940,11 @@ def _patch_skill(
             "file_preview": preview,
         }
 
-    # Check size limit on the result
+    # Check size limit on the result. ``previous`` lets a net-shorter edit
+    # through on a file that is already oversized, so an over-limit skill can
+    # still be repaired and trimmed instead of being frozen.
     target_label = "SKILL.md" if not file_path else file_path
-    err = _validate_content_size(new_content, label=target_label)
+    err = _validate_content_size(new_content, label=target_label, previous=content)
     if err:
         return {"success": False, "error": err}
 

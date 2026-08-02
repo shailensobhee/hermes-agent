@@ -209,3 +209,84 @@ class TestHandPlacedSkillsNoLimit:
         assert "content" in result
         # The full content is returned — no truncation at the storage layer
         assert len(result["content"]) > MAX_SKILL_CONTENT_CHARS
+
+
+class TestConfigurableLimit:
+    """skills.max_content_chars overrides the built-in ceiling."""
+
+    def _write_cfg(self, tmp_path, value):
+        import yaml
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.safe_dump({"skills": {"max_content_chars": value}}), encoding="utf-8")
+        return cfg
+
+    def test_default_when_unset(self, isolate_skills, tmp_path):
+        from tools.skill_manager_tool import _configured_max_content_chars
+        assert _configured_max_content_chars() == MAX_SKILL_CONTENT_CHARS
+
+    def test_raised_ceiling_allows_bigger_skill(self, isolate_skills, tmp_path):
+        from tools.skill_manager_tool import _configured_max_content_chars
+        self._write_cfg(tmp_path, 250_000)
+        assert _configured_max_content_chars() == 250_000
+        assert _validate_content_size("a" * 150_000) is None
+
+    def test_zero_disables_the_check(self, isolate_skills, tmp_path):
+        self._write_cfg(tmp_path, 0)
+        assert _validate_content_size("a" * 500_000) is None
+
+    def test_negative_disables_the_check(self, isolate_skills, tmp_path):
+        self._write_cfg(tmp_path, -1)
+        assert _validate_content_size("a" * 500_000) is None
+
+    def test_garbage_falls_back_to_default(self, isolate_skills, tmp_path):
+        from tools.skill_manager_tool import _configured_max_content_chars
+        self._write_cfg(tmp_path, "not-a-number")
+        assert _configured_max_content_chars() == MAX_SKILL_CONTENT_CHARS
+        assert _validate_content_size("a" * 500_000) is not None
+
+    def test_error_message_names_the_escape_hatch(self, isolate_skills):
+        err = _validate_content_size("a" * (MAX_SKILL_CONTENT_CHARS + 1))
+        assert "skills.max_content_chars" in err
+
+
+class TestOversizedSkillStaysEditable:
+    """An already-oversized skill must not be frozen against repair."""
+
+    def test_shorter_edit_allowed_when_over_limit(self):
+        prev = "a" * 104_000
+        assert _validate_content_size("a" * 103_000, previous=prev) is None
+
+    def test_equal_length_edit_allowed_when_over_limit(self):
+        prev = "a" * 104_000
+        assert _validate_content_size("a" * 104_000, previous=prev) is None
+
+    def test_longer_edit_still_blocked_when_over_limit(self):
+        prev = "a" * 104_000
+        assert _validate_content_size("a" * 104_500, previous=prev) is not None
+
+    def test_growth_under_the_limit_is_unaffected(self):
+        assert _validate_content_size("a" * 60_000, previous="a" * 50_000) is None
+
+    def test_patch_shrinking_an_oversized_skill_succeeds(self, isolate_skills):
+        """End to end: patch a real over-limit SKILL.md to be smaller."""
+        skill_dir = isolate_skills / "giant"
+        skill_dir.mkdir(parents=True)
+        content = _make_skill_content(MAX_SKILL_CONTENT_CHARS + 5_000)
+        content = content.replace("name: test-skill", "name: giant")
+        # Unique anchor: the filler body is uniform, so patch needs something
+        # it can match exactly once.
+        anchor = "\nDELETE-ME-" + ("z" * 3_000) + "\n"
+        content = content + anchor
+        assert len(content) > MAX_SKILL_CONTENT_CHARS
+        (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+        result = json.loads(skill_manage(
+            action="patch",
+            name="giant",
+            old_string=anchor,
+            new_string="\nSHORTER\n",
+        ))
+        assert result["success"] is True, result.get("error")
+        after = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        assert len(after) < len(content)
+        assert len(after) > MAX_SKILL_CONTENT_CHARS  # still over, still allowed
