@@ -64,6 +64,10 @@ async def test_clarify_with_choices_mirrors_question_into_content():
     assert sent["view"] is not None
     assert "Hermes needs your input" in sent["content"]
     assert "Which environment should I deploy to?" in sent["content"]
-    assert "Pick one below" in sent["content"]
+    assert "Pick the matching number below" in sent["content"]
+    # Every choice is enumerated in full, numbered to match the button prefix,
+    # so long options stay readable despite Discord's 80-char label cap.
+    assert "1. staging" in sent["content"]
+    assert "2. production" in sent["content"]
 
 

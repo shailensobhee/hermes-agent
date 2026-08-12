@@ -294,3 +294,109 @@ class TestDiscordSendClarify:
         for label in choice_labels:
             assert "only_name_here" not in label, f"name leaked: {label!r}"
             assert "only_value_here" not in label, f"value leaked: {label!r}"
+
+
+# ---------------------------------------------------------------------------
+# Regression: interactive prompts must never clip their payload
+# ---------------------------------------------------------------------------
+
+class TestPromptNeverClipped:
+    """Interactive prompts must show their full payload, never ``[...]``.
+
+    Two independent clipping bugs shipped here:
+
+      1. Long choices are ellipsised on the button label (Discord's hard
+         80-UTF-16-unit cap), leaving the user picking between options they
+         cannot read. Fix: enumerate every choice in full in the message body,
+         numbered to match the ``N.`` button prefix.
+      2. ``_self_contained_prompt_content`` hard-truncated the whole payload at
+         MAX_MESSAGE_LENGTH with ``... [truncated]``. Fix: spill overflow into
+         additional messages and hang the buttons off the last chunk.
+    """
+
+    @pytest.mark.asyncio
+    async def test_long_choices_appear_in_full(self):
+        adapter = _make_adapter(allowed_users={"42"})
+        channel = MagicMock()
+        sent = MagicMock()
+        sent.id = 777
+        channel.send = AsyncMock(return_value=sent)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        long_a = (
+            "Register 3-4 extra runners first, then fan out jax plus vllm plus "
+            "sglang plus pytorch in parallel across every available DO VM"
+        )
+        long_b = (
+            "Write the env-bump PRs for vllm, sglang and pytorch first, then "
+            "dispatch everything once all four have been reviewed and merged"
+        )
+        assert utf16_len(long_a) > 80 and utf16_len(long_b) > 80
+
+        result = await adapter.send_clarify(
+            chat_id="9001", question="What next?", choices=[long_a, long_b],
+            clarify_id="cidLong", session_key="sk-Long",
+        )
+        assert result.success is True
+
+        all_text = "".join(
+            str(c.kwargs.get("content") or "") for c in channel.send.call_args_list
+        )
+        # Full text of BOTH options is present despite the button ellipsis.
+        assert long_a in all_text
+        assert long_b in all_text
+        # Numbering matches the "N." prefix the buttons carry.
+        assert "1. " in all_text and "2. " in all_text
+
+    @pytest.mark.asyncio
+    async def test_overflowing_prompt_splits_instead_of_truncating(self):
+        adapter = _make_adapter(allowed_users={"42"})
+        channel = MagicMock()
+        sent = MagicMock()
+        sent.id = 778
+        channel.send = AsyncMock(return_value=sent)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        # Comfortably past Discord's 2000-char single-message cap.
+        huge_question = "QUESTION_BODY " * 400
+        result = await adapter.send_clarify(
+            chat_id="9001", question=huge_question, choices=["yes", "no"],
+            clarify_id="cidHuge", session_key="sk-Huge",
+        )
+        assert result.success is True
+
+        calls = channel.send.call_args_list
+        assert len(calls) > 1, "overflowing prompt must span multiple messages"
+
+        all_text = "".join(str(c.kwargs.get("content") or "") for c in calls)
+        # The clipping marker must be gone entirely.
+        assert "[truncated]" not in all_text
+        # Every message respects the platform cap.
+        for c in calls:
+            assert len(str(c.kwargs.get("content") or "")) <= adapter.MAX_MESSAGE_LENGTH
+        # Buttons hang off the LAST message so they sit under the text.
+        assert calls[-1].kwargs.get("view") is not None
+        assert all(c.kwargs.get("view") is None for c in calls[:-1])
+
+    @pytest.mark.asyncio
+    async def test_long_exec_approval_command_not_truncated(self):
+        adapter = _make_adapter(allowed_users={"42"})
+        channel = MagicMock()
+        sent = MagicMock()
+        sent.id = 779
+        channel.send = AsyncMock(return_value=sent)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        long_cmd = "\n".join(f"echo line-{i}-payload-data" for i in range(200))
+        result = await adapter.send_exec_approval(
+            chat_id="9001", command=long_cmd, session_key="sk-Cmd",
+            description="a very long reason " * 40,
+        )
+        assert result.success is True
+
+        calls = channel.send.call_args_list
+        all_text = "".join(str(c.kwargs.get("content") or "") for c in calls)
+        assert "[truncated]" not in all_text
+        # First and last lines of the command both survived.
+        assert "echo line-0-payload-data" in all_text
+        assert "echo line-199-payload-data" in all_text

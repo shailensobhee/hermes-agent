@@ -844,10 +844,17 @@ def custom_provider_slug(display_name: str, provider_key: str = "") -> str:
 def custom_provider_aliases(
     display_name: str,
     provider_key: str = "",
+    entry_id: str = "",
 ) -> frozenset[str]:
-    """Return every current and legacy identity accepted for one endpoint."""
+    """Return every current and legacy identity accepted for one endpoint.
+
+    ``entry_id`` is the optional explicit ``id:`` field on a custom_providers
+    entry (AMD LLM Gateway configs pin ``model.provider`` to it). Treated as a
+    first-class alias so a provider referenced by id resolves like one
+    referenced by name or provider_key.
+    """
     aliases: set[str] = set()
-    for value in (display_name, provider_key):
+    for value in (display_name, provider_key, entry_id):
         raw = str(value or "").strip().lower()
         if not raw:
             continue
@@ -908,7 +915,9 @@ def resolve_custom_provider(
             )
 
         slug = custom_provider_slug(display_name, provider_key)
-        if requested not in custom_provider_aliases(display_name, provider_key):
+        if requested not in custom_provider_aliases(
+            display_name, provider_key, str(entry.get("id") or "")
+        ):
             continue
 
         return ProviderDef(

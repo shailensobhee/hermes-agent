@@ -1622,6 +1622,9 @@ def _normalize_custom_provider_entry(
         "request_timeout_seconds", "stale_timeout_seconds",
         "discover_models", "extra_body", "extra_headers", "capabilities",
         "ssl_ca_cert", "ssl_verify",
+        # AMD LLM Gateway (APIM) custom-header support: preserve
+        # these gateway keys instead of dropping them.
+        "custom_headers", "verify", "id",
     }
     for camel, snake in _CAMEL_ALIASES.items():
         if camel in entry and snake not in entry:
@@ -1787,6 +1790,20 @@ def _normalize_custom_provider_entry(
         normalized["ssl_verify"] = ssl_verify
     elif isinstance(ssl_verify, str) and ssl_verify.strip():
         normalized["ssl_verify"] = ssl_verify.strip()
+
+    # Custom gateway header auto-resolution (APIM): preserve
+    # custom_headers, verify and id so resolve_custom_gateway_headers()
+    # can inject the Ocp-Apim-Subscription-Key. Without this the
+    # normalizer strips them and the primary model 401s (falls back).
+    custom_headers = entry.get("custom_headers")
+    if isinstance(custom_headers, dict) and custom_headers:
+        normalized["custom_headers"] = dict(custom_headers)
+    verify_val = entry.get("verify")
+    if isinstance(verify_val, bool):
+        normalized["verify"] = verify_val
+    entry_id = entry.get("id")
+    if isinstance(entry_id, str) and entry_id.strip():
+        normalized["id"] = entry_id.strip()
 
     return normalized
 

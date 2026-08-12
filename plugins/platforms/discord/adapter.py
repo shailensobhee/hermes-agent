@@ -982,15 +982,23 @@ def _read_dm_role_auth_guild() -> Optional[int]:
     return guild_id if guild_id > 0 else None
 
 
-# Default timeout for Discord interactive button views (exec approval, slash
-# confirm, update prompt, clarify choice). Used when the user has not set
-# ``approvals.discord_prompt_timeout`` in config.yaml. 300s (5 min) matches
-# the previous hardcoded value. Bounded to a sane range — Discord
-# interaction tokens expire from the API's side at ~15 minutes, so 900s is
-# the practical ceiling.
+# Fallback timeout for Discord interactive button views (exec approval, slash
+# confirm, update prompt, clarify choice, model/choice pickers). Only used
+# when neither ``approvals.discord_prompt_timeout`` nor the backend clarify
+# timeout can be resolved (e.g. config.yaml unreadable).
+#
+# The normal path derives the view timeout from the backend wait the buttons
+# are attached to (``clarify.timeout`` / ``agent.clarify_timeout``), so the
+# buttons stay alive exactly as long as the agent is actually waiting. A
+# user who configures the agent to wait indefinitely (``0``) gets buttons
+# that never expire (``timeout=None`` in discord.py).
+#
+# There is deliberately no maximum. Discord's ~15-minute interaction-token
+# expiry applies to responding to an *existing* interaction; these views hang
+# off a normal bot message, so every fresh click mints a new token and a view
+# can stay live indefinitely.
 _DISCORD_PROMPT_TIMEOUT_DEFAULT = 300
 _DISCORD_PROMPT_TIMEOUT_MIN = 30
-_DISCORD_PROMPT_TIMEOUT_MAX = 900
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -1000,15 +1008,27 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in {"true", "1", "yes", "on"}
 
 
-def _read_discord_prompt_timeout() -> int:
+def _read_discord_prompt_timeout() -> Optional[float]:
     """Return the timeout (in seconds) for Discord button views.
 
-    Reads ``approvals.discord_prompt_timeout`` from config.yaml. Falls back
-    to the historical 300s default for any missing / malformed value, and
-    clamps the result to ``[_DISCORD_PROMPT_TIMEOUT_MIN,
-    _DISCORD_PROMPT_TIMEOUT_MAX]`` so a typo can't accidentally make
-    interactive prompts disappear (too short) or outlive Discord's own
-    15-minute interaction-token expiry (too long).
+    Resolution order:
+
+    1. ``approvals.discord_prompt_timeout`` if the user set it explicitly,
+    2. else the backend clarify timeout (``clarify.timeout`` /
+       ``agent.clarify_timeout``) that the buttons are attached to,
+    3. else :data:`_DISCORD_PROMPT_TIMEOUT_DEFAULT`.
+
+    ``<= 0`` means *wait forever* — the Hermes convention everywhere else —
+    and is returned as ``None``, which discord.py reads as "this view never
+    expires".  Positive values are clamped up to
+    :data:`_DISCORD_PROMPT_TIMEOUT_MIN` so a typo can't make prompts vanish
+    before anyone can click them.  There is no upper clamp: these views hang
+    off a normal bot message, so each click mints a fresh interaction token
+    and the view can outlive Discord's ~15-minute token expiry.
+
+    Deriving the default from the backend timeout keeps the two in sync — an
+    operator who tells the agent to wait indefinitely gets buttons that wait
+    indefinitely too, with no second config key to discover.
     """
     raw: Any = None
     try:
@@ -1016,6 +1036,8 @@ def _read_discord_prompt_timeout() -> int:
         cfg = read_raw_config() or {}
         approvals_cfg = cfg.get("approvals", {}) or {}
         raw = approvals_cfg.get("discord_prompt_timeout")
+        if raw is None or raw == "":
+            raw = _resolve_backend_prompt_timeout(cfg)
     except Exception:
         return _DISCORD_PROMPT_TIMEOUT_DEFAULT
     if raw is None or raw == "":
@@ -1024,11 +1046,24 @@ def _read_discord_prompt_timeout() -> int:
         seconds = int(raw)
     except (TypeError, ValueError):
         return _DISCORD_PROMPT_TIMEOUT_DEFAULT
+    if seconds <= 0:
+        return None  # discord.py: view never expires
     if seconds < _DISCORD_PROMPT_TIMEOUT_MIN:
         return _DISCORD_PROMPT_TIMEOUT_MIN
-    if seconds > _DISCORD_PROMPT_TIMEOUT_MAX:
-        return _DISCORD_PROMPT_TIMEOUT_MAX
     return seconds
+
+
+def _resolve_backend_prompt_timeout(cfg: dict) -> Optional[int]:
+    """Best-effort read of the backend wait the Discord buttons front.
+
+    Returns ``None`` when it can't be determined, letting the caller fall
+    back to :data:`_DISCORD_PROMPT_TIMEOUT_DEFAULT`.
+    """
+    try:
+        from tools.clarify_gateway import resolve_clarify_timeout
+        return resolve_clarify_timeout(cfg)
+    except Exception:
+        return None
 
 
 class DiscordAdapter(BasePlatformAdapter):
@@ -7473,6 +7508,59 @@ class DiscordAdapter(BasePlatformAdapter):
             body = body[: max(0, budget - len(truncated_suffix))] + truncated_suffix
         return f"{prefix}{body}{suffix}"
 
+    async def _send_prompt_with_overflow(
+        self,
+        channel: Any,
+        *,
+        header: str,
+        body: str,
+        tail: str = "",
+        embed: Any = None,
+        view: Any = None,
+        code_block: bool = False,
+        **extra_send_kwargs: Any,
+    ) -> Any:
+        """Send an interactive prompt whose payload is never clipped.
+
+        ``_self_contained_prompt_content`` hard-truncates at
+        ``MAX_MESSAGE_LENGTH`` with ``... [truncated]``, which silently eats
+        the tail of long questions and long choice lists — the user is asked
+        to pick between options they cannot read.
+
+        This splits the payload across as many messages as it needs using the
+        platform's fence-aware ``truncate_message`` splitter, then attaches
+        the embed and the component row to the LAST chunk so the buttons sit
+        directly beneath the text they belong to.
+
+        Returns the message carrying the view (the one callers must keep for
+        ``on_timeout`` editing).
+        """
+        body = str(body or "")
+        if code_block:
+            full = f"{header}\n```bash\n{body}\n```{tail}"
+        else:
+            full = f"{header}\n\n{body}{tail}"
+
+        chunks = self.truncate_message(full, self.MAX_MESSAGE_LENGTH)
+
+        # Leading chunks are plain text; the final chunk carries the embed
+        # and the interactive components. Mention-allowlist kwargs ride on
+        # the first chunk only, so a multi-part prompt pings once.
+        first = True
+        for chunk in chunks[:-1]:
+            lead_kwargs = dict(extra_send_kwargs) if first else {}
+            await channel.send(content=chunk, **lead_kwargs)
+            first = False
+
+        send_kwargs: Dict[str, Any] = {"content": chunks[-1]}
+        if first:
+            send_kwargs.update(extra_send_kwargs)
+        if embed is not None:
+            send_kwargs["embed"] = embed
+        if view is not None:
+            send_kwargs["view"] = view
+        return await channel.send(**send_kwargs)
+
     def _approval_mention_content(self) -> Optional[str]:
         """Return user mentions for approval prompts when explicitly enabled.
 
@@ -7519,31 +7607,24 @@ class DiscordAdapter(BasePlatformAdapter):
             # component row on some clients (notably web/mobile), so the actual
             # command and reason must be visible in the same content block as
             # the approval buttons.
-            reason_budget = 300
+            #
+            # Neither the command nor the reason is clipped: overflow spills
+            # into additional messages via _send_prompt_with_overflow. Approving
+            # a command you can only half-read is a security footgun.
             reason_display = str(description or "dangerous command")
-            if len(reason_display) > reason_budget:
-                reason_display = reason_display[: reason_budget - 15] + "... [truncated]"
 
             prompt_prefix = (
                 "⚠️ **Command Approval Required**\n\n"
                 "Do you want Hermes to run this command?\n\n"
-                "**Requested command:**\n```bash\n"
+                "**Requested command:**"
             )
             if smart_denied:
-                prompt_prefix += "**Smart DENY:** owner override applies to this one operation only.\n\n"
+                prompt_prefix += "\n\n**Smart DENY:** owner override applies to this one operation only."
             mention_content = self._approval_mention_content()
             if mention_content:
                 prompt_prefix = f"{mention_content}\n{prompt_prefix}"
-            prompt_tail = f"\n```\n**Reason:** {reason_display}"
-            truncated_suffix = "\n... [truncated]"
-            command_budget = max(0, self.MAX_MESSAGE_LENGTH - len(prompt_prefix) - len(prompt_tail))
+            prompt_tail = f"\n**Reason:** {reason_display}"
             content_cmd_display = str(command or "")
-            if len(content_cmd_display) > command_budget:
-                content_cmd_display = (
-                    content_cmd_display[: max(0, command_budget - len(truncated_suffix))]
-                    + truncated_suffix
-                )
-            content = f"{prompt_prefix}{content_cmd_display}{prompt_tail}"
 
             # Preserve the richer embed path and its larger description budget
             # for clients where embeds render correctly.
@@ -7556,7 +7637,17 @@ class DiscordAdapter(BasePlatformAdapter):
                 description=f"```\n{embed_cmd_display}\n```",
                 color=discord.Color.orange(),
             )
-            embed.add_field(name="Reason", value=reason_display, inline=False)
+            # Embed field values cap at 1024 — the plain-text mirror above
+            # carries the untruncated reason regardless.
+            embed.add_field(
+                name="Reason",
+                value=(
+                    reason_display
+                    if len(reason_display) <= 1024
+                    else reason_display[:1021] + "..."
+                ),
+                inline=False,
+            )
 
             require_admin, admin_user_ids = _resolve_exec_approval_admin_gate(
                 getattr(self.config, "extra", None)
@@ -7572,7 +7663,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 smart_denied=smart_denied,
             )
 
-            send_kwargs: Dict[str, Any] = {"content": content, "embed": embed, "view": view}
+            send_kwargs: Dict[str, Any] = {}
             if mention_content:
                 allowed_mentions_cls = getattr(discord, "AllowedMentions", None)
                 if allowed_mentions_cls is not None:
@@ -7582,7 +7673,16 @@ class DiscordAdapter(BasePlatformAdapter):
                         everyone=False,
                         replied_user=False,
                     )
-            msg = await channel.send(**send_kwargs)
+            msg = await self._send_prompt_with_overflow(
+                channel,
+                header=prompt_prefix,
+                body=content_cmd_display,
+                tail=prompt_tail,
+                embed=embed,
+                view=view,
+                code_block=True,
+                **send_kwargs,
+            )
             view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))
 
@@ -7722,9 +7822,26 @@ class DiscordAdapter(BasePlatformAdapter):
             clean_choices = clean_choices[:24]
 
             if clean_choices:
+                # Discord button labels are hard-capped at 80 UTF-16 units, so
+                # long choices get ellipsised on the button itself. Enumerate
+                # every option in full here, numbered to match the "N." prefix
+                # on each button, so the user always reads the complete option
+                # before clicking. Never clip the list — overflow spills into
+                # the plain-content mirror below, which chunks across messages.
+                numbered = "\n".join(
+                    f"**{i + 1}.** {c}" for i, c in enumerate(clean_choices)
+                )
+                pick_hint = (
+                    "Pick the matching number below, or click "
+                    "✏️ Other to type a custom answer."
+                )
+                # Embed field values cap at 1024. If the enumerated list
+                # overflows, drop it from the field — the plain-text mirror
+                # carries the full list regardless, so nothing is lost.
+                field_value = f"{numbered}\n\n{pick_hint}"
                 embed.add_field(
                     name="Choices",
-                    value="Pick one below, or click ✏️ Other to type a custom answer.",
+                    value=field_value if len(field_value) <= 1024 else pick_hint,
                     inline=False,
                 )
                 view = ClarifyChoiceView(
@@ -7742,17 +7859,28 @@ class DiscordAdapter(BasePlatformAdapter):
                 view = None
 
             # Mirror the question in plain content — embeds are invisible on
-            # some clients (see send_exec_approval).
-            clarify_tail = (
-                "\n\nPick one below, or click ✏️ Other to type a custom answer."
-                if clean_choices
-                else "\n\nReply in this channel with your answer."
-            )
-            content = self._self_contained_prompt_content(
-                "❓ **Hermes needs your input**", str(question or "").strip(),
+            # some clients (see send_exec_approval). The full numbered choice
+            # list rides along so the options stay readable even when the
+            # embed is hidden and the button labels are ellipsised.
+            if clean_choices:
+                clarify_tail = (
+                    "\n\n"
+                    + "\n".join(
+                        f"{i + 1}. {c}" for i, c in enumerate(clean_choices)
+                    )
+                    + "\n\nPick the matching number below, or click "
+                    "✏️ Other to type a custom answer."
+                )
+            else:
+                clarify_tail = "\n\nReply in this channel with your answer."
+            msg = await self._send_prompt_with_overflow(
+                channel,
+                header="❓ **Hermes needs your input**",
+                body=str(question or "").strip(),
                 tail=clarify_tail,
+                embed=embed,
+                view=view,
             )
-            msg = await channel.send(content=content, embed=embed, view=view) if view else await channel.send(content=content, embed=embed)
             if view:
                 view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))
@@ -7790,11 +7918,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 allowed_role_ids=self._allowed_role_ids,
             )
             # Mirror the prompt in plain content — embeds are invisible on
-            # some clients (see send_exec_approval).
-            content = self._self_contained_prompt_content(
-                "⚕ **Update Needs Your Input**", f"{prompt}{default_hint}"
+            # some clients (see send_exec_approval). Never clipped.
+            msg = await self._send_prompt_with_overflow(
+                channel,
+                header="⚕ **Update Needs Your Input**",
+                body=f"{prompt}{default_hint}",
+                embed=embed,
+                view=view,
             )
-            msg = await channel.send(content=content, embed=embed, view=view)
             view._message = msg  # store for on_timeout expiration editing
             if _metadata_marks_nonconversational(metadata):
                 self._nonconversational_messages.mark_many([str(msg.id)])
@@ -8975,7 +9106,7 @@ def _define_discord_view_classes() -> None:
                     embed = msg.embeds[0] if msg.embeds else None
                     if embed:
                         embed.color = discord.Color.greyple()
-                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                        embed.set_footer(text="⏱ Buttons expired - reply in chat to answer")
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass  # message deleted or too old to edit
@@ -9090,7 +9221,7 @@ def _define_discord_view_classes() -> None:
                     embed = msg.embeds[0] if msg.embeds else None
                     if embed:
                         embed.color = discord.Color.greyple()
-                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                        embed.set_footer(text="⏱ Buttons expired - reply in chat to answer")
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass
@@ -9186,7 +9317,7 @@ def _define_discord_view_classes() -> None:
                     embed = msg.embeds[0] if msg.embeds else None
                     if embed:
                         embed.color = discord.Color.greyple()
-                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                        embed.set_footer(text="⏱ Buttons expired - reply in chat to answer")
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass
@@ -9209,7 +9340,7 @@ def _define_discord_view_classes() -> None:
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
         ):
-            super().__init__(timeout=120)
+            super().__init__(timeout=_read_discord_prompt_timeout())
             self.providers = providers
             self.current_model = current_model
             self.current_provider = current_provider
@@ -9569,7 +9700,7 @@ def _define_discord_view_classes() -> None:
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
         ):
-            super().__init__(timeout=120)
+            super().__init__(timeout=_read_discord_prompt_timeout())
             self.choices = list(choices)[:_DISCORD_SELECT_MAX_OPTIONS]
             self.on_choice_selected = on_choice_selected
             self.allowed_user_ids = allowed_user_ids
@@ -9875,7 +10006,7 @@ def _define_discord_view_classes() -> None:
                     embed = msg.embeds[0] if msg.embeds else None
                     if embed:
                         embed.color = discord.Color.greyple()
-                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                        embed.set_footer(text="⏱ Buttons expired - reply in chat to answer")
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass

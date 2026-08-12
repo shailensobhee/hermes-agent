@@ -2560,6 +2560,13 @@ DEFAULT_CONFIG = {
         "cron_mode": "deny",
         "single_query_mode": "deny",
         "unattended_mode": "deny",
+        # Lifetime of Discord interactive button views (exec approval, slash
+        # confirm, update prompt, clarify choice, model/choice pickers).
+        # ``None`` (the default) derives it from the backend wait the buttons
+        # front, i.e. ``clarify.timeout`` / ``agent.clarify_timeout``, so the
+        # two can't drift. ``0`` means the buttons never expire. Set an
+        # explicit number of seconds to override.
+        "discord_prompt_timeout": None,
         # Operator-customizable policy text for smart approvals. When
         # non-empty, this is appended to the smart-approval guardian's
         # SYSTEM prompt (trusted channel) as additional rules — e.g.
