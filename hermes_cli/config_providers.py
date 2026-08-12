@@ -119,7 +119,9 @@ _KNOWN_PROVIDER_KEYS = {
     "api_mode", "transport", "model", "default_model", "models", "models_discovered",
     "context_length", "rate_limit_delay", "request_timeout_seconds", "stale_timeout_seconds",
     "discover_models", "extra_body", "extra_headers", "capabilities", "ssl_ca_cert", "ssl_verify",
-    "catalog_provider", "session_affinity_header"}
+    "catalog_provider", "session_affinity_header",
+    # maia: custom_headers/verify alias -> native extra_headers/ssl_verify (see normalizer tail)
+    "custom_headers", "verify"}
 
 
 def _pick_provider_base_url(entry: Dict[str, Any], provider_key: str) -> str:
@@ -278,6 +280,20 @@ def _normalize_custom_provider_entry(
         normalized["ssl_verify"] = ssl_verify
     elif isinstance(ssl_verify, str) and ssl_verify.strip():
         normalized["ssl_verify"] = ssl_verify.strip()
+
+    # maia: custom_headers/verify alias. The AMD LLM Gateway config predates the
+    # upstream native keys and uses ``custom_headers`` (APIM Ocp-Apim-Subscription-Key)
+    # and a bool ``verify``. Fold them onto the native ``extra_headers`` / ``ssl_verify``
+    # so upstream's client builders inject them (no hand-rolled adapter patch needed).
+    if "extra_headers" not in normalized:
+        _ch = entry.get("custom_headers")
+        _nh = normalize_extra_headers(_ch) if isinstance(_ch, dict) else {}
+        if _nh:
+            normalized["extra_headers"] = _nh
+    if "ssl_verify" not in normalized:
+        _v = entry.get("verify")
+        if isinstance(_v, bool):
+            normalized["ssl_verify"] = _v
 
     return normalized
 
