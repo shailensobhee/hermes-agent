@@ -146,6 +146,21 @@ _NESTED_CHILDREN_NOTE = (
     "Default is 'leaf'; pass role='orchestrator' explicitly when a child needs to further decompose its work."
 )
 
+ZERO_ASSUMPTION_STANDARD = (
+    "\n## Operating standard: zero assumptions\n"
+    "The user requires comprehensive, verified work with zero room for mistakes.\n"
+    "- Never assume. Any fact you state about code, config, files, hosts, versions, or running "
+    "services must come from something you actually observed this task (tool output, a file you "
+    "read, a command you ran). If you have not verified it, go check it.\n"
+    "- Never fabricate output, file contents, command results, versions, or paths. If a real path "
+    "is blocked, say so and try another route.\n"
+    "- Label anything unverified explicitly instead of presenting a guess as fact.\n"
+    "- Prove capability end-to-end, not just a surface check.\n"
+    "- Before concluding absence ('not found', 'not configured'), confirm you looked in the right place.\n"
+    "- Never use em dashes anywhere in your output."
+)
+
+
 def _build_child_system_prompt(
     goal: str, context: Optional[str] = None, *, workspace_path: Optional[str] = None, role: str = "leaf",
     max_spawn_depth: int = 2, child_depth: int = 1,
@@ -175,6 +190,7 @@ def _build_child_system_prompt(
         if _ctx_files.strip():
             parts.append(_CONTEXT_FILES_INTRO + _ctx_files.strip())
     parts.append(_COMPLETION_INSTRUCTIONS)
+    parts.append(ZERO_ASSUMPTION_STANDARD)
     if role == "orchestrator":
         child_note = _LEAF_CHILDREN_NOTE if child_depth + 1 >= max_spawn_depth else _NESTED_CHILDREN_NOTE
         parts.append(

@@ -891,3 +891,48 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+
+def resolve_custom_gateway_headers(base_url: str):
+    """Resolve (headers_dict, verify) for a base URL from custom_providers config.
+
+    Returns (None, None) if no entry matches. verify is a bool (False disables
+    SSL verification) or None if not configured. NOTE: returns a TUPLE.
+    """
+    if not base_url:
+        return None, None
+    from hermes_cli.config import load_config
+    try:
+        from hermes_cli.config_providers import get_compatible_custom_providers
+    except Exception:
+        get_compatible_custom_providers = globals().get("get_compatible_custom_providers")
+    config = load_config()
+    normalized = base_url.strip().rstrip("/").lower()
+    custom_providers = get_compatible_custom_providers(config) if get_compatible_custom_providers else []
+    for entry in (custom_providers or []):
+        if not isinstance(entry, dict):
+            continue
+        entry_url = (entry.get("base_url") or "").strip().rstrip("/").lower()
+        if not entry_url or entry_url != normalized:
+            continue
+        headers = entry.get("custom_headers")
+        verify_val = entry.get("verify")
+        if isinstance(headers, dict) and headers:
+            return dict(headers), verify_val if isinstance(verify_val, bool) else None
+        if isinstance(verify_val, bool):
+            return None, verify_val
+    providers = config.get("providers")
+    if isinstance(providers, dict):
+        for _key, entry in providers.items():
+            if not isinstance(entry, dict):
+                continue
+            entry_url = (entry.get("base_url") or entry.get("url") or entry.get("api") or "").strip().rstrip("/").lower()
+            if not entry_url or entry_url != normalized:
+                continue
+            headers = entry.get("custom_headers")
+            verify_val = entry.get("verify")
+            if isinstance(headers, dict) and headers:
+                return dict(headers), verify_val if isinstance(verify_val, bool) else None
+            if isinstance(verify_val, bool):
+                return None, verify_val
+    return None, None

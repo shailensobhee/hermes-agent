@@ -369,6 +369,21 @@ def _create_thread(
     return json.dumps({"success": True, "thread_id": thread["id"], "name": thread.get("name")})
 
 
+def _rename_channel(token: str, channel_id: str, name: str, **_kwargs: Any) -> str:
+    """Rename a channel or thread. PATCH /channels/{id}: a thread the bot created
+    needs only SEND_MESSAGES; another user's thread needs MANAGE_THREADS; a regular
+    channel needs MANAGE_CHANNELS."""
+    name = (name or "").strip()
+    if not 1 <= len(name) <= 100:
+        return tool_error(f"Channel name must be 1-100 characters (got {len(name)}).")
+    channel = _discord_request("PATCH", f"/channels/{channel_id}", token, body={"name": name})
+    type_id = channel.get("type")
+    return json.dumps({
+        "success": True, "channel_id": channel["id"], "name": channel.get("name"),
+        "type": _channel_type_name(type_id) if type_id is not None else None,
+    })
+
+
 def _mutation(method: str, path: str, message: str):
     """Body-less write action: ``path``/``message`` are format templates over the action kwargs."""
     def _action(token: str, **kw: Any) -> str:
@@ -405,6 +420,7 @@ _ACTION_MANIFEST = [
     ("unpin_message", _unpin_message, "(channel_id, message_id)", "unpin a message"),
     ("delete_message", _delete_message, "(channel_id, message_id)", "delete a message"),
     ("create_thread", _create_thread, "(channel_id, name)", "create a public thread; optional message_id anchor"),
+    ("rename_channel", _rename_channel, "(channel_id, name)", "rename a channel or thread (1-100 chars)"),
     ("add_role", _add_role, "(guild_id, user_id, role_id)", "assign a role"),
     ("remove_role", _remove_role, "(guild_id, user_id, role_id)", "remove a role"),
 ]
@@ -479,7 +495,7 @@ _SCHEMA_PROPERTIES: Dict[str, Any] = {
     "role_id": {"type": "string", "description": "Discord role ID."},
     "message_id": {"type": "string", "description": "Discord message ID."},
     "query": {"type": "string", "description": "Member name prefix to search for (search_members)."},
-    "name": {"type": "string", "description": "New thread name (create_thread)."},
+    "name": {"type": "string", "description": "New name, 1-100 chars (create_thread, rename_channel)."},
     "limit": {
         "type": "integer",
         "minimum": 1,
@@ -554,6 +570,9 @@ _ACTION_403_HINT = {
     "unpin_message": f"{_NO_MANAGE_MESSAGES}.",
     "delete_message": f"{_NO_MANAGE_MESSAGES}, or cannot view the channel/message.",
     "create_thread": "Bot lacks CREATE_PUBLIC_THREADS in this channel, or cannot view it.",
+    "rename_channel": ("Renaming a thread the bot did not create requires MANAGE_THREADS on the "
+        "parent channel; renaming a regular channel requires MANAGE_CHANNELS. A bot can always "
+        "rename a thread it created itself (403 code 50013 otherwise)."),
     "add_role": (
         f"{_ROLE_HIERARCHY} Roles can only be assigned below the bot's own position in the role hierarchy."),
     "remove_role": _ROLE_HIERARCHY,

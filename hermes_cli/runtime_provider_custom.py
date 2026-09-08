@@ -119,7 +119,11 @@ def _match_new_style_provider(requested_norm: str, providers: Dict[str, Any]) ->
         # alias match (scope-aware ``_getenv`` fails closed identically for every entry).
         key_env = _clean(entry.get("key_env") or entry.get("api_key_env"))
         api_key = rp._getenv(key_env, "").strip() if key_env else ""
-        if requested_norm not in custom_provider_aliases(str(entry.get("name", "") or ep_name), str(ep_name)):
+        _mset = set(custom_provider_aliases(str(entry.get("name", "") or ep_name), str(ep_name)))
+        _eid = _clean(entry.get("id")).lower()
+        if _eid:
+            _mset.update({_eid, f"custom:{_eid}"})
+        if requested_norm not in _mset:
             continue
         base_url = _entry_url(entry)
         if not base_url:
@@ -147,7 +151,17 @@ def _match_legacy_custom_provider(requested_norm: str, custom_providers) -> Opti
         if not isinstance(name, str) or not isinstance(base_url, str):
             continue
         provider_key = _clean(entry.get("provider_key", ""))
-        if requested_norm not in custom_provider_aliases(name, provider_key):
+        # Upstream aliases PLUS our explicit id/provider_key. "AMD LLM Gateway
+        # (Anthropic)" slugifies WITH parens -> does not match the configured
+        # custom:amd-llm-gateway-anthropic; the id closes that gap (401 otherwise).
+        _mset = set(custom_provider_aliases(name, provider_key))
+        _eid = _clean(entry.get("id")).lower()
+        if _eid:
+            _mset.update({_eid, f"custom:{_eid}"})
+        _pk = provider_key.lower()
+        if _pk:
+            _mset.update({_pk, f"custom:{_pk}"})
+        if requested_norm not in _mset:
             continue
         result = {"name": name.strip(), "base_url": base_url.strip(), "api_key": _clean(entry.get("api_key", ""))}
         model_name = _clean(entry.get("model", ""))

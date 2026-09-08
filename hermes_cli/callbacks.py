@@ -144,9 +144,10 @@ def approval_callback(cli, command: str, description: str) -> str:
                     cli._app.invalidate()
                 return result
             except queue.Empty:
-                remaining = cli._approval_deadline - _time.monotonic()
-                if remaining <= 0:
-                    break
+                if timeout > 0:
+                    remaining = cli._approval_deadline - _time.monotonic()
+                    if remaining <= 0:
+                        break
                 if hasattr(cli, "_app") and cli._app:
                     cli._app.invalidate()
 

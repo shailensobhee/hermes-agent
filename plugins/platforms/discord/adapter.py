@@ -959,6 +959,29 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in {"true", "1", "yes", "on"}
 
 
+def _discord_view_timeout(*config_keys):
+    """Resolve a discord.py View timeout from config, honoring the user's hard
+    'never auto-expire an interactive prompt' rule. value <= 0 or >= 1yr -> None
+    (wait forever); nothing configured -> None. Pass (section, key) tuples in
+    priority order, e.g. ("approvals", "timeout")."""
+    _FOREVER_S = 31536000
+    try:
+        from cli import CLI_CONFIG as _cfg
+    except Exception:
+        _cfg = {}
+    for section, key in config_keys:
+        try:
+            sect = _cfg.get(section, {}) if isinstance(_cfg, dict) else {}
+            if key in sect and sect.get(key) is not None:
+                val = float(sect.get(key))
+                if val <= 0 or val >= _FOREVER_S:
+                    return None
+                return val
+        except Exception:
+            continue
+    return None  # nothing configured -> wait forever
+
+
 def _read_discord_prompt_timeout() -> int:
     """Timeout (seconds) for Discord button views from ``approvals.discord_prompt_timeout``
     (default 300), clamped to [MIN, MAX] so a typo can't make prompts vanish or outlive tokens."""
@@ -6025,7 +6048,7 @@ def _define_discord_view_classes() -> None:
             require_admin: bool = False, admin_user_ids: Optional[set] = None,
             allow_permanent: bool = True, allow_session: bool = True, smart_denied: bool = False,
         ):
-            super().__init__(allowed_user_ids, allowed_role_ids, timeout=_read_discord_prompt_timeout())
+            super().__init__(allowed_user_ids, allowed_role_ids, timeout=_discord_view_timeout(("approvals", "gateway_timeout"), ("approvals", "timeout")))
             self.session_key = session_key
             self.require_admin = require_admin
             self.admin_user_ids = {str(a).strip() for a in (admin_user_ids or set()) if str(a).strip()}
@@ -6106,7 +6129,7 @@ def _define_discord_view_classes() -> None:
         ``GatewayRunner._request_slash_confirm``); clicks call ``tools.slash_confirm.resolve(...)``."""
 
         def __init__(self, session_key: str, confirm_id: str, allowed_user_ids: set, allowed_role_ids: Optional[set] = None):
-            super().__init__(allowed_user_ids, allowed_role_ids, timeout=_read_discord_prompt_timeout())
+            super().__init__(allowed_user_ids, allowed_role_ids, timeout=_discord_view_timeout(("approvals", "gateway_timeout"), ("approvals", "timeout")))
             self.session_key = session_key
             self.confirm_id = confirm_id
 
@@ -6148,7 +6171,7 @@ def _define_discord_view_classes() -> None:
         ``.update_response`` for the detached update process to pick up."""
 
         def __init__(self, session_key: str, allowed_user_ids: set, allowed_role_ids: Optional[set] = None):
-            super().__init__(allowed_user_ids, allowed_role_ids, timeout=_read_discord_prompt_timeout())
+            super().__init__(allowed_user_ids, allowed_role_ids, timeout=_discord_view_timeout(("approvals", "gateway_timeout"), ("approvals", "timeout")))
             self.session_key = session_key
 
         async def _respond(self, interaction: discord.Interaction, answer: str, color: discord.Color, label: str):
@@ -6181,7 +6204,7 @@ def _define_discord_view_classes() -> None:
             self, providers: list, current_model: str, current_provider: str, session_key: str,
             on_model_selected, allowed_user_ids: set, allowed_role_ids: Optional[set] = None,
         ):
-            super().__init__(allowed_user_ids, allowed_role_ids, timeout=120)
+            super().__init__(allowed_user_ids, allowed_role_ids, timeout=_discord_view_timeout(("agent", "clarify_timeout"), ("clarify", "timeout")))
             self.providers = providers
             self.current_model = current_model
             self.current_provider = current_provider
@@ -6409,7 +6432,7 @@ def _define_discord_view_classes() -> None:
         Single-use: after the first valid click all buttons disable."""
 
         def __init__(self, choices: List[str], clarify_id: str, allowed_user_ids: set, allowed_role_ids: Optional[set] = None):
-            super().__init__(allowed_user_ids, allowed_role_ids, timeout=_read_discord_prompt_timeout())
+            super().__init__(allowed_user_ids, allowed_role_ids, timeout=_discord_view_timeout(("agent", "clarify_timeout"), ("clarify", "timeout")))
             self.choices = list(choices)[:24]
             self.clarify_id = clarify_id
             for index, choice in enumerate(self.choices):

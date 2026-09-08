@@ -83,6 +83,24 @@ def _skills_dir() -> Path:
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
 MAX_SKILL_CONTENT_CHARS = 100_000   # ~36k tokens at 2.75 chars/token
+
+
+def _configured_max_content_chars() -> int:
+    """Resolve the SKILL.md write limit, honouring ``skills.max_content_chars``.
+
+    A non-positive value disables the check. Invalid/unreadable config falls
+    back to the default rather than failing the write.
+    """
+    try:
+        from hermes_cli.config import load_config
+        raw = (load_config().get("skills", {}) or {}).get("max_content_chars")
+        if raw is None:
+            return MAX_SKILL_CONTENT_CHARS
+        limit = int(raw)
+        return limit if limit > 0 else 0
+    except Exception:
+        logger.debug("skills.max_content_chars lookup failed", exc_info=True)
+        return MAX_SKILL_CONTENT_CHARS
 MAX_SKILL_FILE_BYTES = 1_048_576    # 1 MiB per supporting file
 VALID_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9._-]*$')  # filesystem-safe, URL-friendly
 ALLOWED_SUBDIRS = {"references", "templates", "scripts", "assets"}  # for write_file/remove_file
@@ -163,13 +181,24 @@ def _validate_frontmatter(content: str, *, new_skill: bool = False) -> Optional[
     return None
 
 
-def _validate_content_size(content: str, label: str = "SKILL.md") -> Optional[str]:
-    if len(content) > MAX_SKILL_CONTENT_CHARS:
-        return (
-            f"{label} content is {len(content):,} characters (limit: {MAX_SKILL_CONTENT_CHARS:,}). "
-            f"Consider splitting into a smaller SKILL.md with supporting files in references/ "
-            f"or templates/.")
-    return None
+def _validate_content_size(
+    content: str, label: str = "SKILL.md", previous: Optional[str] = None,
+) -> Optional[str]:
+    """``previous`` is the current on-disk content when editing. An edit that
+    leaves the file the same size or SMALLER is always allowed, even above the
+    limit, so an already-oversized skill can still be repaired/trimmed."""
+    limit = _configured_max_content_chars()
+    if limit <= 0:
+        return None
+    if len(content) <= limit:
+        return None
+    if previous is not None and len(content) <= len(previous):
+        return None
+    return (
+        f"{label} content is {len(content):,} characters (limit: {limit:,}). "
+        f"Consider splitting into a smaller SKILL.md with supporting files in references/ "
+        f"or templates/. If this skill genuinely needs to be larger, raise the ceiling with "
+        f"`hermes config set skills.max_content_chars <N>` (0 disables the check).")
 
 
 def _description_preview(content: str) -> str:
@@ -469,7 +498,7 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str = N
             from tools.fuzzy_match import format_no_match_hint
             match_error += format_no_match_hint(match_error, match_count, old_string, content)
         return _err(match_error) | {"file_preview": _clip(content, 500, "...")}
-    if err := _validate_content_size(new_content, label=target_label):
+    if err := _validate_content_size(new_content, label=target_label, previous=content):
         return _err(err)
     if not file_path and (err := _validate_frontmatter(new_content)):
         return _err(f"Patch would break SKILL.md structure: {err}")

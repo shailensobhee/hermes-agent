@@ -49,7 +49,9 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
     The per-thread interrupt flag carries no stable machine-checkable cause, so a
     fail-closed deny preserves the historical semantics; changing this needs a
     dedicated interrupt-cause channel, not string matching."""
-    deadline = time.monotonic() + max(_ctx._get_approval_timeout(), 0)
+    _ap_timeout = _ctx._get_approval_timeout()
+    _wait_forever = _ap_timeout <= 0  # standing rule: never auto-deny on silence
+    deadline = time.monotonic() + max(_ap_timeout, 0)
     heartbeat = activity_heartbeat("waiting for user approval")
     with human_wait_window(session_key):
         while True:
@@ -59,10 +61,12 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
             if is_interrupted():
                 logger.info(interrupt_log, session_key)
                 return "interrupted"
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return "timeout"
-            if event.wait(timeout=min(1.0, remaining)):
+            if not _wait_forever:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return "timeout"
+            _slice = 1.0 if _wait_forever else min(1.0, remaining)
+            if event.wait(timeout=_slice):
                 return "set"
             heartbeat()
 

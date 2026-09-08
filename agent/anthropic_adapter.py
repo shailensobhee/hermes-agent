@@ -373,7 +373,7 @@ def _auth_style(api_key, base_url, normalized_base_url) -> str:
     return "api_key"
 
 
-def build_anthropic_client(api_key, base_url: str = None, timeout: float = None, *, drop_context_1m_beta: bool = False):
+def build_anthropic_client(api_key, base_url: str = None, timeout: float = None, *, drop_context_1m_beta: bool = False, default_headers: dict = None, verify: bool = True):
     """Create an Anthropic client, auto-detecting setup-tokens vs API keys. ``api_key`` is a static
     ``str`` or a ``Callable[[], str]`` Entra ID bearer provider (routed through
     :func:`_build_anthropic_client_with_bearer_hook`). ``timeout`` overrides the 900s read timeout
@@ -403,6 +403,26 @@ def build_anthropic_client(api_key, base_url: str = None, timeout: float = None,
         # get these from profile.default_headers, but this route never sees the profile.
         for k, v in _attribution_headers().items():
             headers.setdefault(k, v)
+    # -- Custom gateway header + TLS auto-resolution (AMD LLM Gateway / Azure APIM) --
+    # Enterprise APIM gateways require extra headers (e.g. Ocp-Apim-Subscription-Key)
+    # on every request. Auto-resolve from custom_providers config so all call sites
+    # that invoke build_anthropic_client() get the headers automatically.
+    _gw_verify = None
+    if default_headers is not None:
+        headers = {**(headers or {}), **default_headers}
+    elif normalized_base_url:
+        try:
+            from hermes_cli.runtime_provider import resolve_custom_gateway_headers
+            gw_headers, gw_verify = resolve_custom_gateway_headers(normalized_base_url)
+            if gw_headers:
+                headers = {**(headers or {}), **dict(gw_headers)}
+            if gw_verify is not None:
+                _gw_verify = gw_verify
+        except ImportError:
+            pass  # hermes_cli not available in standalone SDK usage
+    if _gw_verify is False or verify is False:
+        from httpx import Client as _HttpxClient
+        kwargs["http_client"] = _HttpxClient(verify=False)
     return _new_sdk_client(sdk, kwargs, headers)
 
 

@@ -117,7 +117,8 @@ _KNOWN_PROVIDER_KEYS = {
     "name", "api", "url", "base_url", "api_key", "key_env", "api_key_env", "key_cmd",
     "api_mode", "transport", "model", "default_model", "models", "models_discovered",
     "context_length", "rate_limit_delay", "request_timeout_seconds", "stale_timeout_seconds",
-    "discover_models", "extra_body", "extra_headers", "capabilities", "ssl_ca_cert", "ssl_verify"}
+    "discover_models", "extra_body", "extra_headers", "capabilities", "ssl_ca_cert", "ssl_verify",
+    "custom_headers", "verify", "id"}
 
 
 def _pick_provider_base_url(entry: Dict[str, Any], provider_key: str) -> str:
@@ -270,6 +271,16 @@ def _normalize_custom_provider_entry(
     elif isinstance(ssl_verify, str) and ssl_verify.strip():
         normalized["ssl_verify"] = ssl_verify.strip()
 
+    custom_headers = entry.get("custom_headers")
+    if isinstance(custom_headers, dict) and custom_headers:
+        normalized["custom_headers"] = dict(custom_headers)
+    verify_val = entry.get("verify")
+    if isinstance(verify_val, bool):
+        normalized["verify"] = verify_val
+    entry_id = entry.get("id")
+    if isinstance(entry_id, str) and entry_id.strip():
+        normalized["id"] = entry_id.strip()
+
     return normalized
 
 
@@ -284,7 +295,7 @@ def _custom_provider_entry_to_provider_config(
     for field in (
         "name", "api_key", "key_env", "models", "models_discovered", "context_length",
         "rate_limit_delay", "discover_models", "extra_body", "extra_headers",
-        "ssl_ca_cert", "ssl_verify"):
+        "ssl_ca_cert", "ssl_verify", "custom_headers", "verify", "id"):
         if field in normalized:
             provider_entry[field] = normalized[field]
     if "model" in normalized:

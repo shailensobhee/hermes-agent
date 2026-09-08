@@ -422,7 +422,18 @@ def resolve_custom_provider(name: str, custom_providers: Optional[List[Dict[str,
                           (entry.get("key_env") or "").strip())
         if first_valid is None:
             first_valid = pdef
-        if requested in custom_provider_aliases(display_name, provider_key):
+        # Upstream aliases PLUS our explicit id: "AMD LLM Gateway (Anthropic)"
+        # slugifies to custom:amd-llm-gateway-(anthropic) (parens kept) which does
+        # NOT match custom:amd-llm-gateway-anthropic. Without the id every call 401s.
+        _mset = set(custom_provider_aliases(display_name, provider_key))
+        _mset.add(custom_provider_slug(display_name, provider_key))
+        _eid = (entry.get("id") or "").strip().lower()
+        if _eid:
+            _mset.update({_eid, f"custom:{_eid}"})
+        _pk = (entry.get("provider_key") or "").strip().lower()
+        if _pk:
+            _mset.update({_pk, f"custom:{_pk}"})
+        if requested in _mset:
             return pdef
     if requested == "custom" and first_valid:
         return first_valid
