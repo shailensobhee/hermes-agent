@@ -185,6 +185,17 @@ def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     # SDK-internal retries by default and let Hermes control the budget; explicit callers can still override
     # via kwargs.
     kwargs.setdefault("max_retries", 0)
+    # Per-provider ``extra_headers`` (e.g. an APIM subscription key on a corporate
+    # gateway) must reach auxiliary calls too, not just the main agent client. The
+    # main paths (agent_init / client_lifecycle) already apply this helper; the aux
+    # factory did not, so title-gen / compression / vision on a custom gateway that
+    # authenticates via extra_headers returned 401 while main chat worked. Matched by
+    # base_url; a config-read failure is swallowed so it never strips existing headers.
+    try:
+        from hermes_cli.config import apply_custom_provider_extra_headers_to_client_kwargs
+        apply_custom_provider_extra_headers_to_client_kwargs(kwargs, base_url)
+    except Exception:
+        pass
     return OpenAI(api_key=api_key, base_url=base_url, **kwargs)
 
 
