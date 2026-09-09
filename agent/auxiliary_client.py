@@ -178,6 +178,23 @@ def _openai_http_client_kwargs(base_url: Optional[str], *, async_mode: bool = Fa
     return {"http_client": client} if client is not None else {}
 
 
+def _merge_custom_gateway_headers(base_url, existing):
+    """Merge a custom_providers entry's extra_headers (matched by base_url) UNDER any
+    caller-supplied headers, so ANY custom gateway surface (APIM key, Host, etc.) authenticates
+    on the OpenAI-wire aux path without per-provider code -- the generic twin of the Anthropic
+    path's native _custom_provider_extra_headers resolution. Caller headers always win; a
+    resolution failure never strips existing headers. Returns a dict or None. #auxheaders"""
+    gw = None
+    try:
+        from hermes_cli.config import get_custom_provider_extra_headers
+        gw = get_custom_provider_extra_headers(str(base_url or ""))
+    except Exception:
+        gw = None
+    if not gw:
+        return existing or None
+    return {**gw, **(existing or {})}
+
+
 def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     if _aux_probe_active():
         # Availability probe: resolved credentials/base_url are the answer.
@@ -193,6 +210,12 @@ def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     # SDK-internal retries by default and let Hermes control the budget; explicit callers can still override
     # via kwargs.
     kwargs.setdefault("max_retries", 0)
+    # Generic custom-gateway subscription headers, matched by base_url: any custom_providers
+    # entry with extra_headers authenticates out of the box here, exactly as the Anthropic path
+    # already does via _custom_provider_extra_headers. #auxheaders
+    _gw_merged = _merge_custom_gateway_headers(base_url, kwargs.get("default_headers"))
+    if _gw_merged:
+        kwargs["default_headers"] = _gw_merged
     return OpenAI(api_key=api_key, base_url=base_url, **kwargs)
 
 
