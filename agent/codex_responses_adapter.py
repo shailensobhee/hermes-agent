@@ -398,6 +398,13 @@ def _assistant_message_item(
     keep_id = not is_github_responses and _nonblank(item_id) and len(item_id.strip()) <= _MAX_RESPONSES_ITEM_ID_LENGTH
     if keep_id and current_issuer_kind == "codex_backend" and not item_id.strip().startswith("msg"):
         keep_id = False
+    # maia: other:* relay. Azure-style Responses relays (AMD LLM gateway /Unified) link each
+    # assistant "message" to its paired "reasoning" item BY ID. Hermes strips the reasoning id
+    # on replay (store=False), so keeping the message id makes the relay 400 with "Item 'msg_...'
+    # provided without its required 'reasoning' item 'rs_...'". Drop the message id too on these
+    # relays to keep the pair symmetric; encrypted_content preserves reasoning continuity.
+    if keep_id and isinstance(current_issuer_kind, str) and current_issuer_kind.startswith("other:"):
+        keep_id = False
     return _message_item(
         content, status=_normalize_responses_message_status(raw.get("status")),
         item_id=item_id.strip() if keep_id else None, phase=phase.strip() if _nonblank(phase) else None,
