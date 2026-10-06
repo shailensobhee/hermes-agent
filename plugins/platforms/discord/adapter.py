@@ -1024,7 +1024,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in {"true", "1", "yes", "on"}
 
 
-def _read_discord_prompt_timeout() -> int:
+def _read_discord_prompt_timeout():  # maia: never-expire -> Optional[int] (None = no timeout)
     """Timeout (seconds) for Discord button views from ``approvals.discord_prompt_timeout``
     (default 300), clamped to [MIN, MAX] so a typo can't make prompts vanish or outlive tokens."""
     raw: Any = None
@@ -1041,6 +1041,12 @@ def _read_discord_prompt_timeout() -> int:
         seconds = int(raw)
     except (TypeError, ValueError):
         return _DISCORD_PROMPT_TIMEOUT_DEFAULT
+    # maia: never-expire sentinel. A configured value <= 0 means "wait indefinitely"
+    # (standing user gate: clarify/approval prompts must never auto-expire). Returning None
+    # makes discord.ui.View(timeout=None) listen forever; each click is a fresh interaction,
+    # so this does not hit the ~15min Discord token limit. Bypasses the [MIN, MAX] clamp.
+    if seconds <= 0:
+        return None
     if seconds < _DISCORD_PROMPT_TIMEOUT_MIN:
         return _DISCORD_PROMPT_TIMEOUT_MIN
     if seconds > _DISCORD_PROMPT_TIMEOUT_MAX:
